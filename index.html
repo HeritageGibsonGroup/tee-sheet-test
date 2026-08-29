@@ -1658,8 +1658,8 @@
           <div class="ts-duty-controls" style="margin-top:0; padding-top:0; border-top:none;">
             <div class="ts-duty-sort">
               <button class="ts-duty-sort-btn ${scheduleSort==='calendar'?'active':''}" data-schedule-sort="calendar">Calendar view</button>
-              <button class="ts-duty-sort-btn ${scheduleSort==='date'?'active':''}" data-schedule-sort="date">Sort by date</button>
-              ${scheduleSort === 'date' ? `<button class="ts-duty-sort-btn" data-schedule-sort="person">Sort by person</button>` : ''}
+              <button class="ts-duty-sort-btn ${scheduleSort==='date'?'active':''}" data-schedule-sort="date">List by date</button>
+              ${scheduleSort === 'date' ? `<button class="ts-duty-sort-btn" data-schedule-sort="person">List by person</button>` : ''}
               <button class="ts-duty-sort-btn ${scheduleSort==='grid'?'active':''}" data-schedule-sort="grid">Grid view</button>
             </div>
             ${(scheduleSort === 'calendar' || scheduleSort === 'grid') ? '' : `
