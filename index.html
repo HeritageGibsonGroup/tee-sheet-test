@@ -465,15 +465,26 @@
 <script>
 (function(){
   const root = document.getElementById('tee-sheet-root');
-  const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbw2DXbcsX-ORzaZlv0WM7GXFBNaWcu3tqM_VvCu0OyxbxL0rJyLeBNqeJe_1mjB56Tbfw/exec';
-  const BACKEND_KEY = 'qdQ5OcCYA5gT';
-  const ME_KEY = 'golf-league-me-TEST';
-  const ADMIN_UNLOCK_KEY = 'golf-league-admin-unlocked-TEST';
-  const VERIFIED_KEY = 'golf-league-verified-players-TEST';
+  // Auto-detects which environment this is running as, based on the URL —
+  // so the exact same file can be uploaded to both the test and live GitHub
+  // repos, and each will safely connect to its own backend and data.
+  // Defaults to TEST unless the URL clearly matches the live site, since
+  // that's the safer default (e.g. when opened as a local file for testing).
+  const IS_LIVE_ENV = window.location.pathname.includes('tee-sheet-live') || window.location.hostname.includes('tee-sheet-live');
+  const IS_TEST_ENV = !IS_LIVE_ENV;
+
+  const BACKEND_URL = IS_LIVE_ENV
+    ? 'https://script.google.com/macros/s/AKfycbzkKxBkARjT_5rVtGrHo7SIlJnTaHJ09juHOTGkdhY44Pt2hMNdotuftauRgLMtbiNLiQ/exec'
+    : 'https://script.google.com/macros/s/AKfycbw2DXbcsX-ORzaZlv0WM7GXFBNaWcu3tqM_VvCu0OyxbxL0rJyLeBNqeJe_1mjB56Tbfw/exec';
+  const BACKEND_KEY = IS_LIVE_ENV ? 'YwlubntDPMdjkcMe' : 'qdQ5OcCYA5gT';
+  const ME_KEY = IS_LIVE_ENV ? 'golf-league-me' : 'golf-league-me-TEST';
+  const ADMIN_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-admin-unlocked' : 'golf-league-admin-unlocked-TEST';
+  const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
   const PLAYERS_PER_TEE_TIME = 4;
+  const PRO_SHOP_EMAILS = ['rdelfs@theheritageclub.net', 'rsatterwhite@theheritageclub.net'];
   const BOOKING_WINDOW_DAYS = 14; // club allows booking 2 weeks ahead
   const WEEKS_AHEAD = 52;
-  const VERSION_DATE = 'August 28, 2026'; // update this each time a change is promoted to live
+  const VERSION_DATE = 'August 29, 2026'; // update this each time a change is promoted to live
   const PLAY_DOWS = [1,3,5]; // Mon, Wed, Fri
   const HOLES_CYCLE = ['18','F9','B9'];
   const HOLES_LABEL = { '18': '18 holes', 'F9': 'Front 9', 'B9': 'Back 9' };
@@ -991,7 +1002,7 @@
           return `- ${p.name}${holesNote}`;
         }).join('\n');
         rows.push({
-          cc: withEmail.map(x => x.p.email).join(','),
+          cc: withEmail.map(x => x.p.email).concat(PRO_SHOP_EMAILS).join(','),
           subject: `Reminder: golf tomorrow, ${dateLabel}`,
           body: `Hi. This message is being sent to you via the Gibson Group's Scheduling app to remind you that the following are signed up to play tomorrow, ${dateLabel}. Hit 'em straight!\n\n${nameLines}`
         });
@@ -1018,7 +1029,7 @@
         return `- ${duty.name}: request ${tt || '?'} tee time${tt===1?'':'s'} for ${dateLabel}${arrivalNote}`;
       }).join('\n');
       rows.push({
-        cc: dutyReminders.map(x => x.duty.email).join(','),
+        cc: dutyReminders.map(x => x.duty.email).concat(PRO_SHOP_EMAILS).join(','),
         subject: `Reminder: pro shop visit tomorrow`,
         body: `Reminder — you have pro-shop duty tomorrow:\n\n${nameLines}`
       });
@@ -2082,6 +2093,7 @@
   }
 
   function testBannerHtml(){
+    if(!IS_TEST_ENV) return '';
     return `<div class="ts-test-banner">⚠ Test version — changes here don't affect the live app</div>`;
   }
 
@@ -2486,8 +2498,8 @@
         ${incomingHtml}
         <div class="ts-duty-controls">
           <div class="ts-duty-sort">
-            <button class="ts-duty-sort-btn ${dutySort==='date'?'active':''}" data-duty-sort="date">Sort by date</button>
-            <button class="ts-duty-sort-btn ${dutySort==='person'?'active':''}" data-duty-sort="person">Sort by person</button>
+            <button class="ts-duty-sort-btn ${dutySort==='date'?'active':''}" data-duty-sort="date">List by date</button>
+            <button class="ts-duty-sort-btn ${dutySort==='person'?'active':''}" data-duty-sort="person">List by person</button>
             <button class="ts-duty-sort-btn ${dutySort==='calendar'?'active':''}" data-duty-sort="calendar">Calendar view</button>
           </div>
           ${dutySort === 'calendar' ? '' : `
