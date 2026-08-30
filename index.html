@@ -229,14 +229,25 @@
   .ts-players .name-chip .holes-badge{
     font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--rust); margin-left:4px;
   }
+  .ts-guest-badge{
+    font-family:'Inter',sans-serif; font-size:9.5px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.03em; color:var(--brass); background:#FBF3E4; border-radius:6px; padding:1px 5px; margin-left:4px;
+  }
+  .ts-admin-toggle-label{
+    display:flex; align-items:center; gap:4px; font-family:'Inter',sans-serif; font-size:12px; color:#6b6a5e; white-space:nowrap;
+  }
   .name-chip .chip-remove{
     background:none; border:none; color:#a3a293; cursor:pointer; font-size:13px; padding:0 0 0 5px; line-height:1;
   }
   .name-chip .chip-remove:hover{ color:var(--rust); }
-  .ts-admin-add{ margin-top:8px; }
+  .ts-admin-add{ margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   .ts-admin-add-select{
     font-family:'Inter',sans-serif; font-size:12px; color:var(--fairway); background:#EEF4EC;
     border:1px solid #CFE0CC; border-radius:16px; padding:4px 10px;
+  }
+  .ts-admin-add-guest-btn{
+    font-family:'Inter',sans-serif; font-size:12px; color:var(--brass); background:#FBF3E4;
+    border:1px solid #EAD6A8; border-radius:16px; padding:4px 10px; cursor:pointer;
   }
   .ts-empty{ font-style:italic; color:#a3a293; }
 
@@ -516,8 +527,24 @@
     });
   }
 
+  // Asks the Apps Script backend to email whoever just got promoted off
+  // standby — the backend does the actual sending (client JS can't send mail
+  // directly). Fails silently if the network hiccups; this is a nice-to-have
+  // notification, not something that should block the signup change itself.
+  async function notifyPromoted(dateKey, playerIds){
+    try{
+      const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=notify_promotion`;
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ dateKey, playerIds })
+      });
+    }catch(e){ /* best-effort */ }
+  }
+
   let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, adminPin: null, playerPins: {} };
   let meId = null;
+  let lastKnownModified = 0;
   let isAdmin = false;
   let verifiedPlayers = [];
   let expanded = {};
@@ -586,20 +613,56 @@
     if(!data.teams) data.teams = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
+    if(typeof data._lastModified !== 'number') data._lastModified = 0;
+    lastKnownModified = data._lastModified;
     normalizeSignups();
     try{ meId = localStorage.getItem(ME_KEY) || null; }catch(e){ meId = null; }
     try{ isAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isAdmin = false; }
+    // A player granted admin privilege on their roster record gets it automatically
+    // once identified — no need to know the shared master PIN.
+    if(meId){
+      const me = data.roster.find(p => p.id === meId);
+      if(me && me.isAdmin) isAdmin = true;
+    }
     try{
       const ver = localStorage.getItem(VERIFIED_KEY);
       verifiedPlayers = ver ? JSON.parse(ver) : [];
     }catch(e){ verifiedPlayers = []; }
   }
 
+  // Before writing, check whether the server's data has changed since we last
+  // loaded or saved it — e.g. from the nightly automation, or someone else's
+  // edit. If so, warn instead of silently overwriting their change. Returns
+  // true if the save should proceed, false if the caller should abort.
+  async function checkNotStale(){
+    try{
+      const fresh = await fetchSharedData();
+      const freshModified = (fresh && typeof fresh._lastModified === 'number') ? fresh._lastModified : 0;
+      if(freshModified !== lastKnownModified){
+        const proceed = await askConfirm(
+          'This has changed elsewhere',
+          "The data has been updated since you loaded this page — possibly by the automated team emails, or someone else. Reloading first is strongly recommended so you don't overwrite their change. Reload now, or continue anyway at your own risk?",
+          'Continue anyway (risky)',
+          'Reload now'
+        );
+        if(!proceed){
+          window.location.reload();
+          return false;
+        }
+      }
+    }catch(e){ /* if the check itself fails, don't block saving over a network hiccup */ }
+    return true;
+  }
+
   async function saveData(){
+    const ok = await checkNotStale();
+    if(!ok) return;
+    data._lastModified = Date.now();
     const maxAttempts = 3;
     for(let attempt = 1; attempt <= maxAttempts; attempt++){
       try{
         await saveSharedData(data);
+        lastKnownModified = data._lastModified;
         return;
       }catch(e){
         if(attempt === maxAttempts){
@@ -745,6 +808,29 @@
       document.getElementById('ts-modal-ok').onclick = cleanup;
       document.getElementById('ts-modal-overlay').addEventListener('click', (e) => {
         if(e.target.id === 'ts-modal-overlay') cleanup();
+      });
+    });
+  }
+
+  function askConfirm(title, message, okLabel, cancelLabel){
+    return new Promise(resolve => {
+      const modalRoot = document.getElementById('ts-modal-root');
+      modalRoot.innerHTML = `
+        <div class="ts-modal-overlay" id="ts-modal-overlay">
+          <div class="ts-modal-box">
+            <h4>${esc(title)}</h4>
+            <p>${esc(message)}</p>
+            <div class="ts-modal-actions">
+              <button class="ts-modal-cancel" id="ts-modal-cancel">${esc(cancelLabel || 'Cancel')}</button>
+              <button class="ts-modal-ok" id="ts-modal-ok">${esc(okLabel || 'Continue')}</button>
+            </div>
+          </div>
+        </div>`;
+      const cleanup = (val) => { modalRoot.innerHTML = ''; resolve(val); };
+      document.getElementById('ts-modal-ok').onclick = () => cleanup(true);
+      document.getElementById('ts-modal-cancel').onclick = () => cleanup(false);
+      document.getElementById('ts-modal-overlay').addEventListener('click', (e) => {
+        if(e.target.id === 'ts-modal-overlay') cleanup(false);
       });
     });
   }
@@ -1686,6 +1772,7 @@
     }
 
     normalizeSignups();
+    if(updatedHandicaps > 0) data.handicapUpdatedAt = Date.now();
     await saveData();
     let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, and updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}.`;
     if(unmatchedNames.length){
@@ -1816,16 +1903,18 @@
             <div class="ts-duty-sort">
               <button class="ts-duty-sort-btn ${scheduleSort==='calendar'?'active':''}" data-schedule-sort="calendar">Calendar view</button>
               <button class="ts-duty-sort-btn ${scheduleSort==='date'?'active':''}" data-schedule-sort="date">List by date</button>
-              ${scheduleSort === 'date' ? `<button class="ts-duty-sort-btn" data-schedule-sort="person">List by person</button>` : ''}
+              <button class="ts-duty-sort-btn ${scheduleSort==='person'?'active':''}" data-schedule-sort="person">List by person</button>
               <button class="ts-duty-sort-btn ${scheduleSort==='grid'?'active':''}" data-schedule-sort="grid">Grid view</button>
             </div>
-            ${(scheduleSort === 'calendar' || scheduleSort === 'grid') ? '' : `
+          </div>
+          ${(scheduleSort === 'calendar' || scheduleSort === 'grid') ? '' : `
+          <div class="ts-duty-controls" style="margin-top:8px; padding-top:0; border-top:none;">
             <select id="ts-schedule-filter">
               <option value="">All players</option>
               ${meId ? `<option value="__me__" ${scheduleFilterId==='__me__'?'selected':''}>Just my dates</option>` : ''}
               ${sortedRoster().map(p => `<option value="${p.id}" ${scheduleFilterId===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}
-            </select>`}
-          </div>
+            </select>
+          </div>`}
           ${scheduleSort === 'date' ? `
             <div class="ts-duty-controls" style="margin-top:0; padding-top:0; border-top:none;">
               <div class="ts-duty-sort">
@@ -1894,8 +1983,9 @@
               const p = data.roster.find(r=>r.id===entry.id);
               if(!p) return '';
               const badge = HOLES_SHORT[entry.holes] ? `<span class="holes-badge">${HOLES_SHORT[entry.holes]}</span>` : '';
+              const guestBadge = p.isGuest ? `<span class="ts-guest-badge">Guest</span>` : '';
               const removeBtn = isAdmin ? `<button class="chip-remove" data-admin-remove="${key}|${entry.id}" title="Remove ${esc(p.name)}">×</button>` : '';
-              return `<span class="name-chip ${entry.id===meId?'me':''}">${esc(p.name)}${badge}${removeBtn}</span>`;
+              return `<span class="name-chip ${entry.id===meId?'me':''}">${esc(p.name)}${guestBadge}${badge}${removeBtn}</span>`;
             }).join('')
           : `<span class="ts-empty">No one signed up yet</span>`;
       }
@@ -1912,6 +2002,7 @@
                <option value="">+ Add a player…</option>
                ${sortedRoster().filter(p => !rosterIdsSignedUp.includes(p.id)).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}
              </select>
+             <button class="ts-admin-add-guest-btn" data-admin-add-guest-key="${key}">+ Add a guest…</button>
            </div>`
         : '';
 
@@ -1930,7 +2021,7 @@
           ${generatedTeams.teams.map((team, i) => `
             <div class="ts-team-row">
               <span class="ts-team-num">Team ${i+1}</span>
-              ${team.map(p => `<span class="name-chip">${esc(p.name)}${p.strokesOff !== null ? ` <span class="ts-team-so">(${p.strokesOff > 0 ? '+' : ''}${p.strokesOff})</span>` : ''}</span>`).join('')}
+              ${team.map(p => `<span class="name-chip">${esc(p.name)}${p.courseHandicap !== null ? ` <span class="ts-team-so">(HC ${p.courseHandicap}${p.strokesOff !== null ? `, Strokes off ${p.strokesOff}` : ''})</span>` : ''}</span>`).join('')}
             </div>`).join('')}
           ${generatedTeams.notInBet && generatedTeams.notInBet.length ? `
             <div class="ts-team-row">
@@ -1940,6 +2031,25 @@
         </div>` : '';
 
       const closure = data.closures[key];
+
+      // Confirming tee times booked belongs to whoever had duty FOR this date
+      // (not the target date above) — this is the same field Booking Duty
+      // edits, just reachable here too since that tab only shows booking days
+      // from today forward, and a booking day can slip into the past before
+      // anyone gets a chance to confirm it there.
+      const dutyForThisDate = dutyForKey(key);
+      const canConfirmThis = !closure && (isAdmin || (meId && dutyForThisDate && dutyForThisDate.id === meId));
+      const confirmedThis = data.confirmedTeeTimes[key];
+      let confirmThisControl = '';
+      if(canConfirmThis){
+        confirmThisControl = `<div class="ts-confirm-row" style="margin-top:6px;">
+            <label>Confirmed:</label>
+            <input type="number" min="0" step="1" data-confirm-key="${key}" value="${confirmedThis || ''}" placeholder="0" style="width:44px;">
+            <span>tee time${confirmedThis===1?'':'s'} booked for this date</span>
+          </div>`;
+      } else if(typeof confirmedThis === 'number' && confirmedThis > 0){
+        confirmThisControl = `<div class="ts-duty-row-sub" style="margin-top:6px;">✅ ${confirmedThis} tee time${confirmedThis===1?'':'s'} confirmed for this date</div>`;
+      }
 
       const countBadge = capacity != null
         ? `${confirmed.length}/${capacity} confirmed${standby.length ? ` <span class="ts-standby-count">+${standby.length} standby</span>` : ''}`
@@ -1995,6 +2105,7 @@
           <div class="ts-players ${isOpen?'open':''}">
             ${namesHtml}
             ${teamsHtml}
+            ${confirmThisControl}
             ${isOpen ? adminAddControl : ''}
           </div>
         </div>`;
@@ -2118,7 +2229,10 @@
           <div class="ts-roster-row" data-pid="${p.id}">
             <input type="text" value="${esc(p.name)}" data-name-input="${p.id}" placeholder="Name">
             <input type="email" value="${esc(p.email || '')}" data-email-input="${p.id}" placeholder="Email (optional)">
+            ${p.isGuest ? `<span class="ts-guest-badge">Guest</span>` : ''}
+            <label class="ts-admin-toggle-label"><input type="checkbox" data-admin-toggle="${p.id}" ${p.isAdmin ? 'checked' : ''}> Admin</label>
             <span class="ts-pin-status ${data.playerPins[p.id] ? 'set' : ''}">${data.playerPins[p.id] ? '🔒 PIN set' : 'No PIN'}</span>
+            <button data-change-pin="${p.id}">${data.playerPins[p.id] ? 'Change PIN' : 'Set PIN'}</button>
             <button data-remove="${p.id}">Remove</button>
           </div>`).join('') || `<p class="ts-empty">No players yet — add your first below.</p>`}
         <div class="ts-add-row">
@@ -2126,7 +2240,7 @@
           <input type="email" placeholder="Email (optional)" id="ts-new-email">
           <button id="ts-add-player">Add</button>
         </div>
-        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
+        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Checking "Admin" gives that player full admin access automatically once they identify themselves — no PIN needed. The shared admin PIN always still works too, so no one can get permanently locked out. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
       </div>
     `;
   }
@@ -2216,6 +2330,17 @@
       return `<div class="ts-closure-row"><span class="ts-closure-date">${esc(tee)}</span><span class="ts-closure-status">Rating ${r.rating ?? '?'} / Slope ${r.slope ?? '?'}</span></div>`;
     }).join('') || '<p class="ts-empty">No tee ratings loaded yet.</p>';
 
+    const STALE_DAYS = 15;
+    let staleBannerHtml = '';
+    if(!data.handicapUpdatedAt){
+      staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>No handicap update on record yet</b> — import a fresh snapshot to get started.</div>`;
+    } else {
+      const daysSince = Math.floor((Date.now() - data.handicapUpdatedAt) / (1000*60*60*24));
+      if(daysSince > STALE_DAYS){
+        staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>Handicaps haven't been updated in ${daysSince} days</b> — since these update about twice a month, it may be time for a fresh import.</div>`;
+      }
+    }
+
     // Course handicap for whoever has the lowest number plays to scratch (0 strokes) —
     // everyone else's "Strokes Off" is their own course handicap minus that lowest one.
     const withCourseHcp = data.roster
@@ -2244,6 +2369,7 @@
 
     el.innerHTML = `
       <div class="ts-roster-panel">
+        ${staleBannerHtml}
         <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
           <span class="ts-import-row-label">Tee ratings</span>
           <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update.</p>
@@ -2502,14 +2628,16 @@
             <button class="ts-duty-sort-btn ${dutySort==='person'?'active':''}" data-duty-sort="person">List by person</button>
             <button class="ts-duty-sort-btn ${dutySort==='calendar'?'active':''}" data-duty-sort="calendar">Calendar view</button>
           </div>
-          ${dutySort === 'calendar' ? '' : `
+        </div>
+        ${dutySort === 'calendar' ? '' : `
+        <div class="ts-duty-controls" style="margin-top:8px;">
           <select id="ts-duty-filter">
             <option value="">All players</option>
             ${meId ? `<option value="__me__" ${dutyFilterId==='__me__'?'selected':''}>Just my dates</option>` : ''}
             <option value="__unassigned__" ${dutyFilterId==='__unassigned__'?'selected':''}>Unassigned</option>
             ${sortedRoster().map(p => `<option value="${p.id}" ${dutyFilterId===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}
-          </select>`}
-        </div>
+          </select>
+        </div>`}
         <div class="ts-duty-panel">
           ${dutySort === 'calendar' ? calendarHtml : rowsHtml}
         </div>
@@ -2711,6 +2839,34 @@
       });
     });
 
+    document.querySelectorAll('[data-admin-toggle]').forEach(chk => {
+      chk.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        const pid = chk.getAttribute('data-admin-toggle');
+        const player = data.roster.find(p => p.id === pid);
+        if(!player) return;
+        if(chk.checked){ player.isAdmin = true; } else { delete player.isAdmin; }
+        await saveData();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-change-pin]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if(!isAdmin) return;
+        const pid = btn.getAttribute('data-change-pin');
+        const player = data.roster.find(p => p.id === pid);
+        if(!player) return;
+        const newPin = await askText(`${data.playerPins[pid] ? 'Change' : 'Set'} PIN for ${player.name}`, 'Enter a 4-digit PIN for this player.');
+        if(newPin === null) return;
+        const trimmed = newPin.trim();
+        if(!/^\d{4}$/.test(trimmed)){ await showMessage('Needs to be 4 digits', 'Enter exactly 4 numbers, like 1234.'); return; }
+        data.playerPins[pid] = trimmed;
+        await saveData();
+        render();
+      });
+    });
+
     const who = document.getElementById('ts-who-select');
     if(who){
       who.onchange = async () => {
@@ -2837,7 +2993,11 @@
         const allowed = isAdmin || (meId && assigned && assigned.id === meId);
         if(!allowed) return;
         const n = parseInt(inp.value, 10);
+        const beforeConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacityFor(key)).confirmed.map(x => x.id);
         if(n > 0){ data.confirmedTeeTimes[key] = n; } else { delete data.confirmedTeeTimes[key]; }
+        const afterConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacityFor(key)).confirmed.map(x => x.id);
+        const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
+        if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
         await saveData();
         render();
       });
@@ -2874,7 +3034,7 @@
 
     document.querySelectorAll('[data-expand]').forEach(row => {
       row.addEventListener('click', (e) => {
-        if(e.target.closest('[data-toggle]') || e.target.closest('[data-holes-set]') || e.target.closest('[data-tee-set]') || e.target.closest('[data-admin-remove]') || e.target.closest('[data-admin-add-key]')) return;
+        if(e.target.closest('[data-toggle]') || e.target.closest('[data-holes-set]') || e.target.closest('[data-tee-set]') || e.target.closest('[data-admin-remove]') || e.target.closest('[data-admin-add-key]') || e.target.closest('[data-admin-add-guest-key]') || e.target.closest('[data-confirm-key]')) return;
         const key = row.getAttribute('data-expand');
         expanded[key] = !expanded[key];
         render();
@@ -2889,12 +3049,19 @@
         if(data.closures[key]) return;
         const list = data.signups[key] || (data.signups[key] = []);
         const idx = list.findIndex(x => x.id === meId);
+        const capacity = capacityFor(key);
+        const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
         if(idx === -1){
           const me = data.roster.find(p => p.id === meId);
           const entry = { id: meId, holes: '18' };
           if(me && me.defaultTee) entry.tee = me.defaultTee;
           list.push(entry);
-        } else list.splice(idx,1);
+        } else {
+          list.splice(idx,1);
+          const afterConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
+          const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
+          if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
+        }
         await saveData();
         render();
       });
@@ -2932,7 +3099,12 @@
         e.stopPropagation();
         if(!isAdmin) return;
         const [key, pid] = btn.getAttribute('data-admin-remove').split('|');
+        const capacity = capacityFor(key);
+        const beforeConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacity).confirmed.map(x => x.id);
         data.signups[key] = (data.signups[key] || []).filter(x => x.id !== pid);
+        const afterConfirmedIds = splitConfirmedStandby(data.signups[key], capacity).confirmed.map(x => x.id);
+        const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
+        if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
         await saveData();
         render();
       });
@@ -2951,6 +3123,28 @@
         if(!list.some(x => x.id === pid)){
           list.push({ id: pid, holes: '18' });
         }
+        await saveData();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-admin-add-guest-key]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if(!isAdmin) return;
+        const key = btn.getAttribute('data-admin-add-guest-key');
+        if(data.closures[key]) return;
+        const name = await askText('Add a guest', "Enter the guest's name, or leave it blank to fill in later. They'll be added to this date only — not to your permanent roster.");
+        if(name === null) return;
+        const trimmed = name.trim();
+        const finalName = trimmed || (() => {
+          const existingGuestCount = data.roster.filter(p => p.isGuest && /^Guest( \d+)?$/.test(p.name)).length;
+          return existingGuestCount === 0 ? 'Guest' : `Guest ${existingGuestCount + 1}`;
+        })();
+        const id = 'guest_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+        data.roster.push({ id, name: finalName, isGuest: true });
+        const list = data.signups[key] || (data.signups[key] = []);
+        list.push({ id, holes: '18' });
         await saveData();
         render();
       });
