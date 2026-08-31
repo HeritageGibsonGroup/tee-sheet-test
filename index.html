@@ -184,13 +184,13 @@
     font-family:'Inter',sans-serif; font-size:11px; font-weight:600; color:var(--fairway);
     background:#fff; border:1px solid var(--fairway); border-radius:14px; padding:3px 10px; cursor:pointer; flex-shrink:0;
   }
-  .ts-toggle{
-    font-family:'Inter',sans-serif; font-size:12.5px; font-weight:600; padding:8px 14px;
+  .ts-signup-select{
+    font-family:'Inter',sans-serif; font-size:12.5px; font-weight:600; padding:8px 10px;
     border-radius:20px; border:1.5px solid var(--fairway); background:#fff; color:var(--fairway); cursor:pointer;
     transition:all .12s ease;
   }
-  .ts-toggle.in{ background:var(--fairway); color:var(--ivory); }
-  .ts-toggle.standby{ background:var(--brass); border-color:var(--brass); }
+  .ts-signup-select.in{ background:var(--fairway); color:var(--ivory); }
+  .ts-signup-select.standby{ background:var(--brass); border-color:var(--brass); color:var(--ivory); }
   .ts-standby-count{ color:var(--brass); font-weight:600; }
   .ts-chip-group-label{
     font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:.06em; text-transform:uppercase;
@@ -229,7 +229,6 @@
   .ts-bet-row:last-child{ border-bottom:none; }
   .ts-bet-row .ts-bet-label{ color:var(--ink); }
   .ts-bet-row .ts-bet-result{ font-family:'IBM Plex Mono',monospace; color:#6b6a5e; white-space:nowrap; }
-  .ts-toggle:active{ transform:scale(0.96); }
   .ts-holes-group{ display:flex; gap:4px; }
   .ts-holes-pill{
     font-family:'IBM Plex Mono',monospace; font-size:10px; color:#8b8a7c; background:#fff;
@@ -2311,9 +2310,14 @@
              ${dutyControl}
            </div>`;
 
-      const signUpLabel = mySignup
+      // "in" option label reflects current or would-be status; "out" option makes
+      // removal an explicit, visible choice instead of an implicit second click on
+      // the same button (players were reporting they couldn't find how to remove
+      // themselves from a date).
+      const inOptionLabel = mySignup
         ? (iAmStandby ? "On standby ✓" : "I'm in ✓")
-        : (capacity != null && confirmed.length >= capacity ? "Join standby list" : "Sign up");
+        : (capacity != null && confirmed.length >= capacity ? "Join standby list" : "I'm in");
+      const outOptionLabel = mySignup ? "Remove me" : "Not playing";
 
       // Show whatever tee this signup is actually saved as; if none was ever set for
       // this specific date (e.g. it predates the player having a default tee, or predates
@@ -2326,9 +2330,10 @@
       const toggleSection = closure
         ? `<span class="ts-closed-toggle-label">Closed</span>`
         : `<div class="ts-toggle-wrap">
-             <button class="ts-toggle ${mySignup?'in':''} ${iAmStandby?'standby':''}" data-toggle="${key}" ${meId ? '' : 'disabled title="Select your name first"'}>
-               ${signUpLabel}
-             </button>
+             <select class="ts-signup-select ${mySignup?'in':''} ${iAmStandby?'standby':''}" data-signup-select="${key}" ${meId ? '' : 'disabled title="Select your name first"'}>
+               <option value="out" ${!mySignup?'selected':''}>${outOptionLabel}</option>
+               <option value="in" ${mySignup?'selected':''}>${inOptionLabel}</option>
+             </select>
              ${mySignup ? `
                <div class="ts-holes-group">
                  ${HOLES_CYCLE.map(h => `<button class="ts-holes-pill ${mySignup.holes===h?'active':''}" data-holes-set="${key}|${h}">${HOLES_PILL_LABEL[h]}</button>`).join('')}
@@ -3509,36 +3514,43 @@
 
     document.querySelectorAll('[data-expand]').forEach(row => {
       row.addEventListener('click', (e) => {
-        if(e.target.closest('[data-toggle]') || e.target.closest('[data-holes-set]') || e.target.closest('[data-tee-set]') || e.target.closest('[data-admin-remove]') || e.target.closest('[data-admin-add-key]') || e.target.closest('[data-admin-add-guest-key]') || e.target.closest('[data-confirm-key]')) return;
+        if(e.target.closest('[data-signup-select]') || e.target.closest('[data-holes-set]') || e.target.closest('[data-tee-set]') || e.target.closest('[data-admin-remove]') || e.target.closest('[data-admin-add-key]') || e.target.closest('[data-admin-add-guest-key]') || e.target.closest('[data-confirm-key]')) return;
         const key = row.getAttribute('data-expand');
         expanded[key] = !expanded[key];
         render();
       });
     });
 
-    document.querySelectorAll('[data-toggle]').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+    document.querySelectorAll('[data-signup-select]').forEach(sel => {
+      sel.addEventListener('click', e => e.stopPropagation());
+      sel.addEventListener('change', async (e) => {
         e.stopPropagation();
         if(!meId) return;
-        const key = btn.getAttribute('data-toggle');
+        const key = sel.getAttribute('data-signup-select');
         if(data.closures[key]) return;
         const list = data.signups[key] || (data.signups[key] = []);
         const idx = list.findIndex(x => x.id === meId);
         const capacity = capacityFor(key);
-        const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
-        if(idx === -1){
+        const wantIn = sel.value === 'in';
+        if(wantIn && idx === -1){
           const me = data.roster.find(p => p.id === meId);
           const entry = { id: meId, holes: '18' };
           if(me && me.defaultTee) entry.tee = me.defaultTee;
           list.push(entry);
-        } else {
+        } else if(!wantIn && idx !== -1){
+          const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           list.splice(idx,1);
           const afterConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
           if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
+        } else {
+          return;
         }
-        await saveData();
+        // Render immediately so the change is visible right away, instead of waiting
+        // on the full save round-trip (a staleness check plus the write, with retries)
+        // before the UI updates — that wait was what made "I'm in" feel slow.
         render();
+        await saveData();
       });
     });
 
