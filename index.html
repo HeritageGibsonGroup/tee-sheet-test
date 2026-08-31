@@ -2274,10 +2274,11 @@
       const bookingDayArrivedForThis = daysBetween(today, bookDateForThis) <= 0;
       const canConfirmThis = !closure && (isAdmin || (meId && bookingDayArrivedForThis && dutyForThisDate && dutyForThisDate.id === meId));
       const confirmedThis = data.confirmedTeeTimes[key];
-      const playLabelForThis = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
-      const bookDayRefForThis = daysBetween(today, bookDateForThis) === 0
-        ? 'today'
-        : `on ${DOW_NAMES[bookDateForThis.getDay()]}, ${MON_NAMES[bookDateForThis.getMonth()]} ${bookDateForThis.getDate()}`;
+      // Just the editable control here — no "booked [when] for [date]" recap. The
+      // card's top-line badge already shows the confirmed count, and the date is
+      // this very card, so repeating both underneath was redundant. A read-only
+      // viewer sees nothing extra here either, for the same reason — the top badge
+      // already told them.
       let confirmThisControl = '';
       if(canConfirmThis){
         confirmThisControl = `<div class="ts-confirm-row" style="margin-top:6px;">
@@ -2286,10 +2287,8 @@
               <option value="" ${!confirmedThis?'selected':''}>–</option>
               ${[1,2,3].map(n => `<option value="${n}" ${confirmedThis===n?'selected':''}>${n}</option>`).join('')}
             </select>
-            <span>tee time${confirmedThis===1?'':'s'} booked ${bookDayRefForThis} for ${playLabelForThis}</span>
+            <span>tee time${confirmedThis===1?'':'s'}</span>
           </div>`;
-      } else if(typeof confirmedThis === 'number' && confirmedThis > 0){
-        confirmThisControl = `<div class="ts-duty-row-sub" style="margin-top:6px;">✅ ${confirmedThis} tee time${confirmedThis===1?'':'s'} confirmed for ${playLabelForThis}</div>`;
       }
 
       const countBadge = capacity != null
@@ -2974,7 +2973,7 @@
             <span>tee time${confirmed===1?'':'s'} booked ${dayRef} for ${playLabel}</span>
           </div>`;
       } else if(typeof confirmed === 'number' && confirmed > 0){
-        confirmControl = `<div class="ts-duty-row-sub">✅ ${confirmed} tee time${confirmed===1?'':'s'} confirmed for ${playLabel}</div>`;
+        confirmControl = `<div class="ts-duty-row-sub">✅ ${confirmed} tee time${confirmed===1?'':'s'} booked ${dayRef} for ${playLabel}</div>`;
       }
 
       return `
