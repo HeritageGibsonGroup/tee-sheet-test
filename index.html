@@ -205,6 +205,21 @@
     text-transform:uppercase; color:var(--fairway); margin-bottom:4px;
   }
   .ts-team-so{ color:#8b8a7c; font-size:10.5px; }
+  .ts-score-table{ border-collapse:collapse; font-family:'IBM Plex Mono',monospace; }
+  .ts-score-table th, .ts-score-table td{ text-align:center; padding:3px 2px; }
+  .ts-score-table thead th{ font-size:10px; font-weight:600; color:#8b8a7c; }
+  .ts-score-table thead tr:first-child th{ font-size:9.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--fairway); padding-bottom:4px; }
+  .ts-score-table td.ts-score-name, .ts-score-table th:first-child{ text-align:left; padding-right:10px; white-space:nowrap; font-family:'Inter',sans-serif; font-size:12.5px; }
+  .ts-score-table th:nth-child(8), .ts-score-table td:nth-child(8),
+  .ts-score-table th:nth-child(14), .ts-score-table td:nth-child(14){ border-left:2px solid var(--ivory-line); }
+  .ts-score-input{
+    width:30px; font-family:'IBM Plex Mono',monospace; font-size:12.5px; text-align:center;
+    padding:4px 2px; border-radius:5px; border:1px solid var(--ivory-line);
+  }
+  .ts-bet-row{ display:flex; justify-content:space-between; gap:10px; padding:5px 0; border-bottom:1px solid var(--ivory-line); font-size:12.5px; }
+  .ts-bet-row:last-child{ border-bottom:none; }
+  .ts-bet-row .ts-bet-label{ color:var(--ink); }
+  .ts-bet-row .ts-bet-result{ font-family:'IBM Plex Mono',monospace; color:#6b6a5e; white-space:nowrap; }
   .ts-toggle:active{ transform:scale(0.96); }
   .ts-holes-group{ display:flex; gap:4px; }
   .ts-holes-pill{
@@ -503,6 +518,11 @@
   const HOLES_SHORT = { '18': '', 'F9': 'F9', 'B9': 'B9' };
   const HOLES_PILL_LABEL = { '18': '18', 'F9': 'Front 9', 'B9': 'Back 9' };
 
+  // Scoring & betting: the round is split into 3 series of 6 holes each,
+  // with a $ stake per series (both admin-configurable per date).
+  const NUM_SERIES = 3;
+  const HOLES_PER_SERIES = 6;
+
   // --- backend: a Google Apps Script Web App backed by a Google Sheet plays the
   // role Claude's window.storage used to play. Personal, per-device data (who you
   // are, whether you're unlocked as admin) lives in this browser's own localStorage
@@ -542,7 +562,54 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, adminPin: null, playerPins: {} };
+  // Score entry and round setup go through their own narrow backend actions
+  // (instead of the whole-blob saveData()) because during a round several
+  // scorekeepers may be saving around the same time — the backend
+  // lock-serializes these and merges just the one hole/setting, so one
+  // group's entry can't silently clobber another's the way a full-blob
+  // overwrite could. The server's returned round object is authoritative.
+  async function saveScore(dateKey, playerId, holeNum, strokes){
+    ensureRoundDefaults(dateKey);
+    if(typeof strokes === 'number' && strokes > 0){
+      if(!data.rounds[dateKey].scores[playerId]) data.rounds[dateKey].scores[playerId] = {};
+      data.rounds[dateKey].scores[playerId][String(holeNum)] = strokes;
+    } else if(data.rounds[dateKey].scores[playerId]){
+      delete data.rounds[dateKey].scores[playerId][String(holeNum)];
+    }
+    try{
+      const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=save_score`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ dateKey, playerId, holeNum: String(holeNum), strokes })
+      });
+      const parsed = JSON.parse(await res.text());
+      if(parsed && parsed.round){
+        data.rounds[dateKey] = parsed.round;
+        if(typeof parsed.lastModified === 'number'){ data._lastModified = parsed.lastModified; lastKnownModified = parsed.lastModified; }
+      }
+    }catch(e){ /* optimistic local edit stands; will reconcile next load */ }
+  }
+
+  async function saveRoundSettings(dateKey, patch){
+    ensureRoundDefaults(dateKey);
+    Object.assign(data.rounds[dateKey], patch);
+    try{
+      const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=save_round_settings`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ dateKey, patch })
+      });
+      const parsed = JSON.parse(await res.text());
+      if(parsed && parsed.round){
+        data.rounds[dateKey] = parsed.round;
+        if(typeof parsed.lastModified === 'number'){ data._lastModified = parsed.lastModified; lastKnownModified = parsed.lastModified; }
+      }
+    }catch(e){ /* best-effort */ }
+  }
+
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, adminPin: null, playerPins: {} };
   let meId = null;
   let lastKnownModified = 0;
   let isAdmin = false;
@@ -550,7 +617,8 @@
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'admin'
-  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps'
+  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps' | 'scoring'
+  let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
   let dutySort = 'date'; // 'date' | 'person'
   let dutyFilterId = ''; // '' = everyone, '__me__' = current identity, or a player id
   let scheduleFilterId = ''; // same idea, for the Upcoming Dates list
@@ -611,6 +679,7 @@
     if(!data.teeRatings) data.teeRatings = {};
     if(!data.teeOptions) data.teeOptions = [];
     if(!data.teams) data.teams = {};
+    if(!data.rounds) data.rounds = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
     if(typeof data._lastModified !== 'number') data._lastModified = 0;
@@ -1223,6 +1292,102 @@
     data.teams[key] = result;
     await saveData();
     return key;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SCORING & BETTING — hole-by-hole scores for the teams above, settled as
+  // NUM_SERIES series of HOLES_PER_SERIES holes each, $stakePerSeries a series.
+  // Each player's round-long "strokes off" (from team generation) is split as
+  // evenly as possible across the 3 series, front-loading any remainder onto
+  // the earlier ones — an approximation, since the app doesn't yet track a
+  // per-hole stroke index for each tee to allocate strokes hole-by-hole.
+  // A team's net for a series is the sum of its players' net scores for that
+  // series' 6 holes; every team is guaranteed the same size by the team
+  // generator above, so that sum is a fair comparison. Every pair of teams is
+  // its own $stakePerSeries bet each series (round-robin), low net wins, ties push.
+  // ---------------------------------------------------------------------------
+
+  function seriesHoleGroups(startHole){
+    const start = (typeof startHole === 'number' && startHole >= 1 && startHole <= 18) ? startHole : 1;
+    const order = Array.from({ length: 18 }, (_, i) => ((start - 1 + i) % 18) + 1);
+    const groups = [];
+    for(let s = 0; s < NUM_SERIES; s++) groups.push(order.slice(s * HOLES_PER_SERIES, s * HOLES_PER_SERIES + HOLES_PER_SERIES));
+    return groups;
+  }
+
+  function strokesForSeries(strokesOff){
+    const so = typeof strokesOff === 'number' && strokesOff > 0 ? strokesOff : 0;
+    const base = Math.floor(so / NUM_SERIES);
+    const remainder = so - base * NUM_SERIES;
+    return Array.from({ length: NUM_SERIES }, (_, i) => base + (i < remainder ? 1 : 0));
+  }
+
+  function ensureRoundDefaults(dateKey){
+    if(!data.rounds[dateKey]) data.rounds[dateKey] = { startHole: 1, stakePerSeries: 1, scores: {} };
+    if(!data.rounds[dateKey].scores) data.rounds[dateKey].scores = {};
+    if(typeof data.rounds[dateKey].startHole !== 'number') data.rounds[dateKey].startHole = 1;
+    if(typeof data.rounds[dateKey].stakePerSeries !== 'number') data.rounds[dateKey].stakePerSeries = 1;
+    return data.rounds[dateKey];
+  }
+
+  // For each team and series: whether every player on the team has all 6
+  // holes entered, and if so, the team's net total for that series. Then
+  // every team-pair's result per series, and each team's running $ total.
+  function computeSeriesStandings(dateKey){
+    const teamsInfo = data.teams[dateKey];
+    const round = data.rounds[dateKey];
+    if(!teamsInfo || !round) return null;
+    const groups = seriesHoleGroups(round.startHole);
+    const scores = round.scores || {};
+    const stake = round.stakePerSeries;
+
+    const teamSeriesNet = teamsInfo.teams.map(team => {
+      return groups.map((holes, si) => {
+        let complete = true;
+        let net = 0;
+        team.forEach(p => {
+          const playerScores = scores[p.id] || {};
+          let gross = 0;
+          holes.forEach(h => {
+            const v = playerScores[String(h)];
+            if(typeof v !== 'number'){ complete = false; }
+            else gross += v;
+          });
+          net += gross - strokesForSeries(p.strokesOff)[si];
+        });
+        return { complete, net };
+      });
+    });
+
+    const numTeams = teamsInfo.teams.length;
+    const matchups = [];
+    for(let si = 0; si < NUM_SERIES; si++){
+      for(let a = 0; a < numTeams; a++){
+        for(let b = a + 1; b < numTeams; b++){
+          const A = teamSeriesNet[a][si], B = teamSeriesNet[b][si];
+          let result = null;
+          if(A.complete && B.complete){
+            if(A.net < B.net) result = 'A';
+            else if(B.net < A.net) result = 'B';
+            else result = 'push';
+          }
+          matchups.push({ seriesIndex: si, teamA: a, teamB: b, aNet: A.complete ? A.net : null, bNet: B.complete ? B.net : null, result });
+        }
+      }
+    }
+
+    const teamTotals = Array.from({ length: numTeams }, () => 0);
+    matchups.forEach(m => {
+      if(m.result === 'A'){ teamTotals[m.teamA] += stake; teamTotals[m.teamB] -= stake; }
+      else if(m.result === 'B'){ teamTotals[m.teamB] += stake; teamTotals[m.teamA] -= stake; }
+    });
+
+    return { groups, teamSeriesNet, matchups, teamTotals, stake };
+  }
+
+  function fmtMoney(n){
+    const sign = n < 0 ? '-' : '';
+    return `${sign}$${Math.abs(n)}`;
   }
 
   // Compares this app's current data against a pasted snapshot from the other app,
@@ -1890,6 +2055,7 @@
             <button class="ts-subtab ${adminSubTab==='data'?'active':''}" data-subtab="data">Data Import/Export &amp; Comparison</button>
             <button class="ts-subtab ${adminSubTab==='reminders'?'active':''}" data-subtab="reminders">Reminders</button>
             <button class="ts-subtab ${adminSubTab==='handicaps'?'active':''}" data-subtab="handicaps">Handicaps</button>
+            <button class="ts-subtab ${adminSubTab==='scoring'?'active':''}" data-subtab="scoring">Scoring &amp; Bets</button>
           </div>
           <div id="ts-admin-content"></div>
         ` : ''}
@@ -1952,6 +2118,7 @@
       else if(adminSubTab === 'data') renderDataPanel(contentEl);
       else if(adminSubTab === 'reminders') renderRemindersPanel(contentEl);
       else if(adminSubTab === 'handicaps') renderHandicapsPanel(contentEl);
+      else if(adminSubTab === 'scoring') renderScoringPanel(contentEl);
     }
 
     function renderDateCardHtml(d){
@@ -2044,7 +2211,10 @@
       if(canConfirmThis){
         confirmThisControl = `<div class="ts-confirm-row" style="margin-top:6px;">
             <label>Confirmed:</label>
-            <input type="number" min="0" step="1" data-confirm-key="${key}" value="${confirmedThis || ''}" placeholder="0" style="width:44px;">
+            <select data-confirm-key="${key}" style="width:52px; font-family:'Inter'; font-size:13px; padding:5px 4px; border-radius:6px; border:1px solid var(--ivory-line);">
+              <option value="" ${!confirmedThis?'selected':''}>–</option>
+              ${[1,2,3].map(n => `<option value="${n}" ${confirmedThis===n?'selected':''}>${n}</option>`).join('')}
+            </select>
             <span>tee time${confirmedThis===1?'':'s'} booked for this date</span>
           </div>`;
       } else if(typeof confirmedThis === 'number' && confirmedThis > 0){
@@ -2073,6 +2243,14 @@
         ? (iAmStandby ? "On standby ✓" : "I'm in ✓")
         : (capacity != null && confirmed.length >= capacity ? "Join standby list" : "Sign up");
 
+      // Show whatever tee this signup is actually saved as; if none was ever set for
+      // this specific date (e.g. it predates the player having a default tee, or predates
+      // this dropdown), fall back to the player's default tee from Admin > Handicaps just
+      // for display, so the dropdown doesn't look like it's arbitrarily showing the first
+      // tee in the list. Doesn't touch saved data — team generation already falls back the
+      // same way (entry.tee || p.defaultTee), so this is purely a display fix.
+      const effectiveTee = mySignup ? (mySignup.tee || (me && me.defaultTee) || '') : '';
+
       const toggleSection = closure
         ? `<span class="ts-closed-toggle-label">Closed</span>`
         : `<div class="ts-toggle-wrap">
@@ -2085,7 +2263,7 @@
                </div>` : ''}
              ${mySignup && data.teeOptions.length ? `
                <select class="ts-tee-select" data-tee-set="${key}">
-                 ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${mySignup.tee===tee?'selected':''}>${esc(tee)} tee</option>`).join('')}
+                 ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${effectiveTee===tee?'selected':''}>${esc(tee)} tee</option>`).join('')}
                </select>` : ''}
            </div>`;
 
@@ -2388,6 +2566,127 @@
     `;
   }
 
+  // Scoring & Bets: hole-by-hole score entry for a date's generated teams,
+  // and the resulting series-by-series bet standings. Admin-only for now
+  // (kept under Admin until this is ready to hand to players directly), but
+  // any admin — including the scorekeeper for a given group, once they're
+  // set up as an admin on the roster — can enter scores for any team here.
+  function renderScoringPanel(el){
+    if(!isAdmin){
+      el.innerHTML = `
+        <div class="ts-roster-panel">
+          <div class="ts-locked-panel">
+            Scoring &amp; bets are admin-only for now.
+            <br><button id="ts-unlock-scoring">Enter admin PIN</button>
+          </div>
+        </div>`;
+      return;
+    }
+
+    const teamDates = Object.keys(data.teams).sort();
+    if(teamDates.length === 0){
+      el.innerHTML = `
+        <div class="ts-roster-panel">
+          <p class="ts-empty">No teams have been generated for any date yet — generate teams on the Handicaps tab first, then come back here to score that round.</p>
+        </div>`;
+      return;
+    }
+    if(!scoringSelectedDate || !teamDates.includes(scoringSelectedDate)){
+      scoringSelectedDate = teamDates[teamDates.length - 1];
+    }
+    const dateKey = scoringSelectedDate;
+    const teamsInfo = data.teams[dateKey];
+    const round = ensureRoundDefaults(dateKey);
+    const groups = seriesHoleGroups(round.startHole);
+    const flatHoles = groups.flat();
+    const standings = computeSeriesStandings(dateKey);
+
+    const d = new Date(dateKey + 'T00:00:00');
+    const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+    const dateOptionsHtml = teamDates.slice().reverse().map(k => {
+      const kd = new Date(k + 'T00:00:00');
+      return `<option value="${k}" ${k===dateKey?'selected':''}>${DOW_NAMES[kd.getDay()]}, ${MON_NAMES[kd.getMonth()]} ${kd.getDate()}</option>`;
+    }).join('');
+
+    const teamCardsHtml = teamsInfo.teams.map((team, ti) => {
+      const rowsHtml = team.map(p => {
+        const playerScores = round.scores[p.id] || {};
+        const cellsHtml = flatHoles.map(h => {
+          const v = playerScores[String(h)];
+          return `<td><input type="number" inputmode="numeric" min="1" max="15" step="1" class="ts-score-input"
+                    data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${h}"
+                    value="${typeof v === 'number' ? v : ''}"></td>`;
+        }).join('');
+        return `<tr><td class="ts-score-name">${esc(p.name)}${p.strokesOff ? ` <span class="ts-team-so">(S.O. ${p.strokesOff})</span>` : ''}</td>${cellsHtml}</tr>`;
+      }).join('');
+
+      return `
+        <div class="ts-teams-block" style="margin-top:16px;">
+          <div class="ts-team-num">Team ${ti+1}</div>
+          <div style="overflow-x:auto;">
+            <table class="ts-score-table">
+              <thead>
+                <tr><th></th><th colspan="${HOLES_PER_SERIES}">Series 1</th><th colspan="${HOLES_PER_SERIES}">Series 2</th><th colspan="${HOLES_PER_SERIES}">Series 3</th></tr>
+                <tr><th></th>${flatHoles.map(h => `<th>${h}</th>`).join('')}</tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }).join('');
+
+    const standingsHtml = standings ? `
+      <div class="ts-import-row">
+        <span class="ts-import-row-label">Series results</span>
+        ${groups.map((holes, si) => {
+          const rowsHtml = standings.matchups.filter(m => m.seriesIndex === si).map(m => {
+            let resultText;
+            if(!m.result) resultText = `<span class="ts-empty">in progress</span>`;
+            else if(m.result === 'push') resultText = `Push (${m.aNet}–${m.bNet})`;
+            else if(m.result === 'A') resultText = `Team ${m.teamA+1} wins ${fmtMoney(standings.stake)} (${m.aNet}–${m.bNet})`;
+            else resultText = `Team ${m.teamB+1} wins ${fmtMoney(standings.stake)} (${m.bNet}–${m.aNet})`;
+            return `<div class="ts-bet-row"><span class="ts-bet-label">Team ${m.teamA+1} vs Team ${m.teamB+1}</span><span class="ts-bet-result">${resultText}</span></div>`;
+          }).join('');
+          return `<div style="margin-top:10px;"><b style="font-size:12.5px;">Series ${si+1}</b> <span class="ts-team-so">(holes ${holes.join(', ')})</span>${rowsHtml}</div>`;
+        }).join('')}
+        <div class="ts-teams-block">
+          <div class="ts-team-num">Running total</div>
+          ${standings.teamTotals.map((t, i) => `<div class="ts-bet-row"><span class="ts-bet-label">Team ${i+1}</span><span class="ts-bet-result" style="color:${t>0?'var(--fairway)':t<0?'var(--rust)':'inherit'};">${fmtMoney(t)}</span></div>`).join('')}
+        </div>
+      </div>` : '';
+
+    el.innerHTML = `
+      <div class="ts-roster-panel">
+        <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+          <span class="ts-import-row-label">Round</span>
+          <div style="margin-top:6px;">
+            <select id="ts-scoring-date-select" style="font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+              ${dateOptionsHtml}
+            </select>
+          </div>
+        </div>
+        <div class="ts-import-row">
+          <span class="ts-import-row-label">Round setup — ${esc(dateLabel)}</span>
+          <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-top:6px;">
+            <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Starting hole
+              <select id="ts-round-start-hole" style="margin-left:6px; font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+                <option value="1" ${round.startHole===1?'selected':''}>1 (front)</option>
+                <option value="10" ${round.startHole===10?'selected':''}>10 (back)</option>
+              </select>
+            </label>
+            <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Stake per series
+              <span style="margin-left:6px;">$</span><input id="ts-round-stake" type="number" min="0" step="1" value="${round.stakePerSeries}"
+                style="width:50px; font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:7px; border:1px solid var(--ivory-line);">
+            </label>
+          </div>
+          <p style="margin:8px 0 0;">Strokes off (from the generated teams) are split as evenly as possible across the 3 six-hole series — an approximation, since holes aren't ranked by difficulty in the app yet. Enter each player's gross score per hole below; net and bet results update as scores come in.</p>
+        </div>
+        ${teamCardsHtml}
+        ${standingsHtml}
+      </div>
+    `;
+  }
+
   function renderClosuresPanel(el, schedule){
     if(!isAdmin){
       el.innerHTML = `
@@ -2554,7 +2853,10 @@
       if(canConfirm){
         confirmControl = `<div class="ts-duty-row-sub ts-confirm-row">
             <label>Confirmed:</label>
-            <input type="number" min="0" step="1" data-confirm-key="${r.playKey}" value="${confirmed || ''}" placeholder="0" style="width:44px;">
+            <select data-confirm-key="${r.playKey}" style="width:52px; font-family:'Inter'; font-size:13px; padding:5px 4px; border-radius:6px; border:1px solid var(--ivory-line);">
+              <option value="" ${!confirmed?'selected':''}>–</option>
+              ${[1,2,3].map(n => `<option value="${n}" ${confirmed===n?'selected':''}>${n}</option>`).join('')}
+            </select>
             <span>tee time${confirmed===1?'':'s'} booked</span>
           </div>`;
       } else if(typeof confirmed === 'number' && confirmed > 0){
@@ -2826,6 +3128,56 @@
         render();
       };
     }
+
+    const unlockScoringBtn = document.getElementById('ts-unlock-scoring');
+    if(unlockScoringBtn){
+      unlockScoringBtn.onclick = async () => {
+        const ok = await requireAdmin();
+        if(ok) render();
+      };
+    }
+
+    const scoringDateSelect = document.getElementById('ts-scoring-date-select');
+    if(scoringDateSelect){
+      scoringDateSelect.onchange = () => {
+        scoringSelectedDate = scoringDateSelect.value;
+        render();
+      };
+    }
+
+    const roundStartHoleSelect = document.getElementById('ts-round-start-hole');
+    if(roundStartHoleSelect){
+      roundStartHoleSelect.onchange = async () => {
+        await saveRoundSettings(scoringSelectedDate, { startHole: parseInt(roundStartHoleSelect.value, 10) });
+        render();
+      };
+    }
+
+    const roundStakeInput = document.getElementById('ts-round-stake');
+    if(roundStakeInput){
+      roundStakeInput.onchange = async () => {
+        const val = parseFloat(roundStakeInput.value);
+        await saveRoundSettings(scoringSelectedDate, { stakePerSeries: isNaN(val) || val < 0 ? 0 : val });
+        render();
+      };
+    }
+
+    document.querySelectorAll('[data-score-hole]').forEach(input => {
+      input.addEventListener('change', async () => {
+        const dateKey = input.getAttribute('data-score-date');
+        const playerId = input.getAttribute('data-score-player');
+        const holeNum = input.getAttribute('data-score-hole');
+        const raw = input.value.trim();
+        const strokes = raw === '' ? null : parseInt(raw, 10);
+        if(strokes !== null && (isNaN(strokes) || strokes < 1 || strokes > 15)){
+          await showMessage('Not a valid score', 'Enter a whole number of strokes between 1 and 15, or leave it blank.');
+          render();
+          return;
+        }
+        await saveScore(dateKey, playerId, holeNum, strokes);
+        render();
+      });
+    });
 
     document.querySelectorAll('[data-default-tee]').forEach(sel => {
       sel.addEventListener('change', async () => {
