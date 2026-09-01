@@ -383,6 +383,12 @@
     font-family:'Fraunces',serif; font-size:14px; margin:0 0 8px; color:var(--fairway);
     border-bottom:1px solid var(--ivory-line); padding-bottom:6px;
   }
+  .ts-person-table{ width:100%; border-collapse:collapse; }
+  .ts-person-table tr{ border-bottom:1px dashed var(--ivory-line); }
+  .ts-person-table tr:last-child{ border-bottom:none; }
+  .ts-person-table td{ padding:9px 4px; font-size:13px; }
+  .ts-person-table td.ts-person-date{ color:var(--ink); font-weight:500; white-space:nowrap; }
+  .ts-person-table td.ts-person-comment{ text-align:right; color:var(--brass); font-weight:600; font-size:12px; }
   .ts-duty-row{
     background:#fff; border:1px solid var(--ivory-line); border-radius:10px; margin-bottom:8px;
     padding:12px 14px; display:flex; align-items:center; gap:14px;
@@ -1326,11 +1332,20 @@
     return (typeof n === 'number' && n > 0) ? n : null;
   }
 
-  async function generateTeamsForNextPlayDay(){
+  // confirmOverwrite, if given, is called (with the date key) when teams already
+  // exist for the target date — e.g. from a manual swap made in Scoring & Bets —
+  // so the caller can warn before that gets discarded. Returns the date key on
+  // success, null if there was nothing to generate, or the string 'cancelled' if
+  // confirmOverwrite was asked and said no.
+  async function generateTeamsForNextPlayDay(confirmOverwrite){
     const schedule = buildSchedule();
     const nextDate = schedule.find(d => !data.closures[fmtDateKey(d)]);
     if(!nextDate) return null;
     const key = fmtDateKey(nextDate);
+    if(data.teams[key] && confirmOverwrite){
+      const proceed = await confirmOverwrite(key);
+      if(!proceed) return 'cancelled';
+    }
     const result = computeTeamsForDate(key);
     if(!result) return null;
     data.teams[key] = result;
@@ -2437,26 +2452,24 @@
 
       const groupsHtml = roster.map(p => {
         const dates = schedule.filter(d => (data.signups[fmtDateKey(d)] || []).some(e => e.id === p.id));
-        const rowsHtml = dates.length ? dates.map(d => {
-          const key = fmtDateKey(d);
-          const entry = data.signups[key].find(e => e.id === p.id);
-          const holesSuffix = entry.holes !== '18' ? ` — ${HOLES_LABEL[entry.holes]}` : '';
-          return `
-            <div class="ts-duty-row">
-              <div class="ts-date-block">
-                <div class="ts-date-dow">${DOW_NAMES[d.getDay()]}</div>
-                <div class="ts-date-num">${d.getDate()}</div>
-                <div class="ts-date-mon">${MON_NAMES[d.getMonth()]}</div>
-              </div>
-              <div class="ts-duty-row-mid">
-                <span class="ts-duty-static">Playing${holesSuffix}</span>
-              </div>
-            </div>`;
-        }).join('') : `<p class="ts-empty">No upcoming dates</p>`;
+        const bodyHtml = dates.length ? `
+          <table class="ts-person-table">
+            <tbody>
+              ${dates.map(d => {
+                const key = fmtDateKey(d);
+                const entry = data.signups[key].find(e => e.id === p.id);
+                const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+                // Only Front 9 / Back 9 gets called out — an ordinary 18-hole
+                // signup is the default and needs no comment.
+                const comment = (entry.holes === 'F9' || entry.holes === 'B9') ? HOLES_LABEL[entry.holes] : '';
+                return `<tr><td class="ts-person-date">${dateLabel}</td><td class="ts-person-comment">${comment}</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>` : `<p class="ts-empty">No upcoming dates</p>`;
         return `
           <div class="ts-person-group">
             <h5>${esc(p.name)}</h5>
-            ${rowsHtml}
+            ${bodyHtml}
           </div>`;
       }).join('');
 
@@ -2716,14 +2729,38 @@
     }
     const dateKey = scoringSelectedDate;
     const teamsInfo = data.teams[dateKey];
+    const d = new Date(dateKey + 'T00:00:00');
+    const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+
+    // Manual swap: lets the admin trade two players between teams — e.g. when a
+    // couple of guys ask to play together — without touching anyone's own
+    // handicap/strokes math, which stays attached to the player, not the team.
+    // Only offered when there's more than one team to swap between.
+    const swapOptionsHtml = teamsInfo.teams.map((team, ti) =>
+      team.map(p => `<option value="${p.id}">Team ${ti+1} — ${esc(p.name)}</option>`).join('')
+    ).join('');
+    const swapRowHtml = teamsInfo.teams.length > 1 ? `
+      <div class="ts-import-row">
+        <span class="ts-import-row-label">Swap players between teams</span>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+          <select id="ts-swap-player-a" style="font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+            ${swapOptionsHtml}
+          </select>
+          <span style="color:#8b8a7c;">⇄</span>
+          <select id="ts-swap-player-b" style="font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+            ${swapOptionsHtml}
+          </select>
+          <button id="ts-swap-players-btn">Swap</button>
+        </div>
+        <p style="margin:8px 0 0;">Trades these two players' teams for ${esc(dateLabel)} only — doesn't change their handicap or strokes, just who they're grouped with. Regenerating teams for this date will undo any swaps.</p>
+      </div>` : '';
+
     const round = ensureRoundDefaults(dateKey);
     const groups = seriesHoleGroups(round.startHole);
     const flatHoles = groups.flat();
     const standings = computeSeriesStandings(dateKey);
     const exact = holeHandicapsComplete();
 
-    const d = new Date(dateKey + 'T00:00:00');
-    const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
     const dateOptionsHtml = teamDates.slice().reverse().map(k => {
       const kd = new Date(k + 'T00:00:00');
       return `<option value="${k}" ${k===dateKey?'selected':''}>${DOW_NAMES[kd.getDay()]}, ${MON_NAMES[kd.getMonth()]} ${kd.getDate()}</option>`;
@@ -2807,6 +2844,7 @@
             : '<span style="color:var(--rust); font-weight:600;">Hole handicaps (stroke index) aren\'t fully set on the Handicaps tab yet</span> — strokes off are being split as evenly as possible across the 3 series instead, as an approximation. Set all 18 hole handicaps for exact stroke-by-stroke allocation.'
           } Enter each player's gross score per hole below; net and bet results update as scores come in.</p>
         </div>
+        ${swapRowHtml}
         ${teamCardsHtml}
         ${standingsHtml}
       </div>
@@ -3271,7 +3309,15 @@
     if(generateTeamsBtn){
       generateTeamsBtn.onclick = async () => {
         if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
-        const key = await generateTeamsForNextPlayDay();
+        const key = await generateTeamsForNextPlayDay(async (k) => {
+          const kd = new Date(k + 'T00:00:00');
+          return await askConfirm(
+            'Teams already exist',
+            `Teams for ${MON_NAMES[kd.getMonth()]} ${kd.getDate()} have already been generated — if you've swapped any players since, regenerating will discard that. Continue?`,
+            'Regenerate', 'Cancel'
+          );
+        });
+        if(key === 'cancelled') return;
         if(!key){
           await showMessage('Nothing to generate', 'No upcoming play day has any signups yet.');
         } else {
@@ -3287,6 +3333,43 @@
       unlockScoringBtn.onclick = async () => {
         const ok = await requireAdmin();
         if(ok) render();
+      };
+    }
+
+    const swapPlayersBtn = document.getElementById('ts-swap-players-btn');
+    if(swapPlayersBtn){
+      swapPlayersBtn.onclick = async () => {
+        const selA = document.getElementById('ts-swap-player-a');
+        const selB = document.getElementById('ts-swap-player-b');
+        const idA = selA.value, idB = selB.value;
+        if(!idA || !idB || idA === idB){
+          await showMessage("Can't swap that", 'Pick two different players to trade teams.');
+          return;
+        }
+        const teamsInfo = data.teams[scoringSelectedDate];
+        if(!teamsInfo) return;
+        let teamA = null, idxA = -1, teamB = null, idxB = -1;
+        teamsInfo.teams.forEach(team => {
+          const ia = team.findIndex(p => p.id === idA);
+          if(ia !== -1){ teamA = team; idxA = ia; }
+          const ib = team.findIndex(p => p.id === idB);
+          if(ib !== -1){ teamB = team; idxB = ib; }
+        });
+        if(!teamA || !teamB){
+          await showMessage("Can't swap that", "Couldn't find one of those players on this date's teams.");
+          return;
+        }
+        if(teamA === teamB){
+          await showMessage('Already on the same team', 'Those two are already grouped together.');
+          return;
+        }
+        // Swap in place — each player keeps their own courseHandicap/strokesOff,
+        // just changes which team array they sit in.
+        const playerA = teamA[idxA], playerB = teamB[idxB];
+        teamA[idxA] = playerB;
+        teamB[idxB] = playerA;
+        await saveData();
+        render();
       };
     }
 
