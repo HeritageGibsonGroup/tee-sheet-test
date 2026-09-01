@@ -570,6 +570,22 @@
     }catch(e){ /* best-effort */ }
   }
 
+  // Fires once, right when a confirmed-tee-times count is entered/changed and it
+  // turns out to be short of what's needed — this is the "we got fewer tee times
+  // than we need" moment. The app doesn't decide who drops out; it just alerts
+  // the admin so the group can work it out. standbyIds is who the app's own
+  // signup-order placeholder currently has sitting out, for context only.
+  async function notifyShortfall(dateKey, signedUpCount, confirmedTeeTimes, capacity, standbyIds){
+    try{
+      const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=notify_shortfall`;
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ dateKey, signedUpCount, confirmedTeeTimes, capacity, standbyIds })
+      });
+    }catch(e){ /* best-effort */ }
+  }
+
   // Score entry and round setup go through their own narrow backend actions
   // (instead of the whole-blob saveData()) because during a round several
   // scorekeepers may be saving around the same time — the backend
@@ -2218,9 +2234,14 @@
           : `<span class="ts-empty">No one signed up yet</span>`;
       }
 
+      // When there's a standby list, it's only ever because fewer tee times came
+      // back than were needed — the app doesn't decide who sits out, it just sorts
+      // by signup order as a placeholder (and alerts the admin, see notifyShortfall)
+      // so the group can actually decide. This note keeps that from reading as final.
       const namesHtml = capacity != null
         ? `<div class="ts-chip-group-label">Playing (${confirmed.length}/${capacity})</div>${chipsFor(sortByLastName(confirmed))}
-           ${standby.length ? `<div class="ts-chip-group-label standby">Standby (${standby.length})</div>${chipsFor(sortByLastName(standby))}` : ''}`
+           ${standby.length ? `<div class="ts-chip-group-label standby">Standby (${standby.length})</div>${chipsFor(sortByLastName(standby))}
+           <div class="ts-note" style="border-top:none; padding-top:0; margin-top:4px;">Sorted by signup order for now — who's actually sitting out for ${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()} hasn't been decided yet.</div>` : ''}`
         : chipsFor(sortByLastName(signedEntries));
 
       const rosterIdsSignedUp = signedEntries.map(e => e.id);
@@ -2260,36 +2281,11 @@
 
       const closure = data.closures[key];
 
-      // Confirming tee times booked belongs to whoever had duty FOR this date
-      // (not the target date above) — this is the same field Booking Duty
-      // edits, just reachable here too since that tab only shows booking days
-      // from today forward, and a booking day can slip into the past before
-      // anyone gets a chance to confirm it there.
-      const dutyForThisDate = dutyForKey(key);
-      // The pro shop can only be visited on or after the actual booking day (14 days
-      // before this play date) — so the assigned duty person can't enter a real
-      // confirmed count before then, only once that day has arrived. Admins can
-      // still fix/clear a value any time, e.g. to correct a stray entry.
-      const bookDateForThis = new Date(d); bookDateForThis.setDate(bookDateForThis.getDate() - BOOKING_WINDOW_DAYS);
-      const bookingDayArrivedForThis = daysBetween(today, bookDateForThis) <= 0;
-      const canConfirmThis = !closure && (isAdmin || (meId && bookingDayArrivedForThis && dutyForThisDate && dutyForThisDate.id === meId));
-      const confirmedThis = data.confirmedTeeTimes[key];
-      // Just the editable control here — no "booked [when] for [date]" recap. The
-      // card's top-line badge already shows the confirmed count, and the date is
-      // this very card, so repeating both underneath was redundant. A read-only
-      // viewer sees nothing extra here either, for the same reason — the top badge
-      // already told them.
-      let confirmThisControl = '';
-      if(canConfirmThis){
-        confirmThisControl = `<div class="ts-confirm-row" style="margin-top:6px;">
-            <label>Confirmed:</label>
-            <select data-confirm-key="${key}" style="width:52px; font-family:'Inter'; font-size:13px; padding:5px 4px; border-radius:6px; border:1px solid var(--ivory-line);">
-              <option value="" ${!confirmedThis?'selected':''}>–</option>
-              ${[1,2,3].map(n => `<option value="${n}" ${confirmedThis===n?'selected':''}>${n}</option>`).join('')}
-            </select>
-            <span>tee time${confirmedThis===1?'':'s'}</span>
-          </div>`;
-      }
+      // The "Confirmed: [–]" input used to also be reachable from this card, as a
+      // fallback for when a booking day slipped into the past before someone got to
+      // the Booking Duty tab. Removed from here per request — entering confirmed
+      // tee times now happens only on the Booking Duty tab; this card's top-line
+      // badge still shows the confirmed count once it's entered there.
 
       const countBadge = capacity != null
         ? `${confirmed.length}/${capacity} confirmed${standby.length ? ` <span class="ts-standby-count">+${standby.length} standby</span>` : ''}`
@@ -2359,7 +2355,6 @@
           <div class="ts-players ${isOpen?'open':''}">
             ${namesHtml}
             ${teamsHtml}
-            ${confirmThisControl}
             ${isOpen ? adminAddControl : ''}
           </div>
         </div>`;
@@ -3472,11 +3467,18 @@
         const allowed = isAdmin || (meId && assigned && assigned.id === meId);
         if(!allowed) return;
         const n = parseInt(inp.value, 10);
-        const beforeConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacityFor(key)).confirmed.map(x => x.id);
+        const signedUpEntries = data.signups[key] || [];
+        const beforeConfirmedIds = splitConfirmedStandby(signedUpEntries, capacityFor(key)).confirmed.map(x => x.id);
         if(n > 0){ data.confirmedTeeTimes[key] = n; } else { delete data.confirmedTeeTimes[key]; }
-        const afterConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacityFor(key)).confirmed.map(x => x.id);
-        const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
+        const newCapacity = capacityFor(key);
+        const { confirmed: afterConfirmed, standby: afterStandby } = splitConfirmedStandby(signedUpEntries, newCapacity);
+        const newlyPromoted = afterConfirmed.map(x => x.id).filter(id => !beforeConfirmedIds.includes(id));
         if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
+        // Fewer tee times came back than are needed for everyone signed up — alert
+        // the admin so the group can decide who sits out; the app isn't deciding.
+        if(newCapacity != null && afterStandby.length > 0){
+          notifyShortfall(key, signedUpEntries.length, n, newCapacity, afterStandby.map(x => x.id));
+        }
         await saveData();
         render();
       });
