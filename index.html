@@ -2491,7 +2491,11 @@
           <input type="email" placeholder="Email (optional)" id="ts-new-email">
           <button id="ts-add-player">Add</button>
         </div>
-        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Checking "Admin" gives that player full admin access automatically once they identify themselves — no PIN needed. The shared admin PIN always still works too, so no one can get permanently locked out. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
+        <div class="ts-import-row" style="margin-top:10px;">
+          <button id="ts-change-admin-pin">${data.adminPin ? 'Change admin PIN' : 'Set admin PIN'}</button>
+          <p>The shared PIN used to unlock admin editing on a device that isn't already an admin by roster flag or the ⚙️ pill.</p>
+        </div>
+        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Checking "Admin" gives that player full admin access automatically once they identify themselves — no PIN needed, and it also skips their own player PIN prompt, since they're already inside the admin gate. The shared admin PIN always still works too, so no one can get permanently locked out. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
       </div>
     `;
   }
@@ -3062,6 +3066,25 @@
       unlockBtn.onclick = async () => {
         const ok = await requireAdmin();
         if(ok){ render(); }
+      };
+    }
+    // Only reachable once already inside the admin gate (isAdmin true) — this is
+    // the one place the shared admin PIN can actually be changed. Previously there
+    // was no such control anywhere: once set, the PIN could only ever be entered
+    // and matched, never overwritten.
+    const changeAdminPinBtn = document.getElementById('ts-change-admin-pin');
+    if(changeAdminPinBtn){
+      changeAdminPinBtn.onclick = async () => {
+        if(!isAdmin) return;
+        const label = data.adminPin ? 'Change admin PIN' : 'Set admin PIN';
+        const newPin = await askText(label, "Enter the new shared admin PIN. Anyone who edits the roster, booking duty, or imports from a device that isn't already admin will need this.");
+        if(newPin === null) return;
+        const trimmed = newPin.trim();
+        if(!trimmed){ await showMessage('PIN cannot be empty', 'Please enter at least one character.'); return; }
+        data.adminPin = trimmed;
+        await saveData();
+        await showMessage('Admin PIN updated', "The shared admin PIN has been changed. Devices that are already unlocked (roster-flagged admins, or anyone who's tapped the ⚙️ pill and entered the old PIN) stay unlocked — this only matters the next time someone unlocks admin from scratch.");
+        render();
       };
     }
     const addBtn = document.getElementById('ts-add-player');
