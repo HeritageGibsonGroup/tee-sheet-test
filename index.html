@@ -521,6 +521,9 @@
   const ADMIN_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-admin-unlocked' : 'golf-league-admin-unlocked-TEST';
   const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
   const PLAYERS_PER_TEE_TIME = 4;
+  // The club never gives us more than 3 tee times, so pre-confirmation
+  // estimates should never assume a 4th one is possible.
+  const MAX_TEE_TIMES = 3;
   const PRO_SHOP_EMAILS = ['rdelfs@theheritageclub.net', 'rsatterwhite@theheritageclub.net'];
   // Extra CC on just the "playing tomorrow" reminder (not the pro-shop duty one).
   const GOLF_TOMORROW_EXTRA_CC = ['stevekirchhoff52@gmail.com', 'rtleene@aol.com'];
@@ -702,14 +705,26 @@
 
   // Signups are stored as { dateKey: [{id, holes}, ...] }. Older data (or a stray
   // manual edit) might have plain id strings instead of objects — normalize on load.
+  // Also drops any entry whose id no longer matches a roster player — these are
+  // "ghost" signups (e.g. left behind by a roster edit that didn't go through the
+  // normal remove-player flow) that inflate the signed-up count and the tee-time
+  // estimate while staying invisible everywhere names are actually listed, since
+  // chipsFor() silently skips an entry it can't resolve to a player. Returns how
+  // many ghost entries were removed, so callers can surface or act on that.
   function normalizeSignups(){
+    let removedGhosts = 0;
     Object.keys(data.signups).forEach(k => {
       data.signups[k] = (data.signups[k] || []).map(entry => {
         if(typeof entry === 'string') return { id: entry, holes: '18' };
         if(entry && entry.id) return { id: entry.id, holes: HOLES_CYCLE.includes(entry.holes) ? entry.holes : '18' };
         return null;
-      }).filter(Boolean);
+      }).filter(Boolean).filter(entry => {
+        const ok = data.roster.some(r => r.id === entry.id);
+        if(!ok) removedGhosts++;
+        return ok;
+      });
     });
+    return removedGhosts;
   }
 
   async function loadData(){
@@ -734,7 +749,7 @@
     if(!data.activityLog) data.activityLog = [];
     if(typeof data._lastModified !== 'number') data._lastModified = 0;
     lastKnownModified = data._lastModified;
-    normalizeSignups();
+    const removedGhosts = normalizeSignups();
     try{ meId = localStorage.getItem(ME_KEY) || null; }catch(e){ meId = null; }
     try{ isAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isAdmin = false; }
     // A player granted admin privilege on their roster record gets it automatically
@@ -747,6 +762,10 @@
       const ver = localStorage.getItem(VERIFIED_KEY);
       verifiedPlayers = ver ? JSON.parse(ver) : [];
     }catch(e){ verifiedPlayers = []; }
+    // Self-heal: if this load turned up ghost signups, persist the cleanup in the
+    // background so the fix sticks for everyone, not just this client's view.
+    // Fire-and-forget — never block the first paint on this.
+    if(removedGhosts > 0){ saveData().catch(()=>{}); }
   }
 
   // Before writing, check whether the server's data has changed since we last
@@ -1223,7 +1242,7 @@
       const bookOpenDate = new Date(d); bookOpenDate.setDate(bookOpenDate.getDate() - BOOKING_WINDOW_DAYS);
       if(daysBetween(today, bookOpenDate) !== 1) return;
       const count = (data.signups[key] || []).length;
-      const tt = count > 0 ? Math.ceil(count/PLAYERS_PER_TEE_TIME) : 0;
+      const tt = count > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(count/PLAYERS_PER_TEE_TIME)) : 0;
       const arrival = arrivalTimeFor(fmtDateKey(bookOpenDate));
       dutyReminders.push({ duty, d, tt, arrival });
     });
@@ -1286,7 +1305,7 @@
       p.strokesOff = (p.courseHandicap !== null) ? (p.courseHandicap - lowestCH) : null;
     });
 
-    const numTeams = confirmedTeeTimesCountFor(dateKey) || Math.max(1, Math.ceil(players.length / PLAYERS_PER_TEE_TIME));
+    const numTeams = confirmedTeeTimesCountFor(dateKey) || Math.min(MAX_TEE_TIMES, Math.max(1, Math.ceil(players.length / PLAYERS_PER_TEE_TIME)));
 
     // Sort by strokes off descending (highest handicap first); anyone with no known
     // handicap goes last, in signup order among themselves.
@@ -1786,7 +1805,7 @@
         const targetKey = fmtDateKey(target);
         const targetDuty = dutyForKey(targetKey);
         const targetCount = (data.signups[targetKey] || []).length;
-        const targetTT = targetCount > 0 ? Math.ceil(targetCount/PLAYERS_PER_TEE_TIME) : 0;
+        const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
         dutyText = targetDuty ? `${esc(firstNameOf(targetDuty.name))} - Get ${targetTT} tee time${targetTT===1?'':'s'} for ${FULL_MONTHS[target.getMonth()]} ${target.getDate()}` : 'Unassigned';
       }
       dutyRows += `<tr><td ${td}>${dateLabel}</td><td ${td}>${dowFull(d)}</td><td ${td}>${dutyText}</td></tr>`;
@@ -2050,10 +2069,11 @@
       });
     }
 
-    normalizeSignups();
+    const removedGhosts = normalizeSignups();
     if(updatedHandicaps > 0) data.handicapUpdatedAt = Date.now();
     await saveData();
     let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}, and updated ${updatedHoleHandicaps} hole handicap${updatedHoleHandicaps===1?'':'s'}.`;
+    if(removedGhosts > 0) msg += ` Also cleaned up ${removedGhosts} stale signup${removedGhosts===1?'':'s'} left over from removed players.`;
     if(unmatchedNames.length){
       msg += ` Couldn't match: ${[...new Set(unmatchedNames)].join(', ')} — check they're spelled the same as in the roster.`;
     }
@@ -2104,7 +2124,7 @@
           const bookOpenDate = new Date(d); bookOpenDate.setDate(bookOpenDate.getDate() - BOOKING_WINDOW_DAYS);
           if(daysBetween(today, bookOpenDate) === 0){
             const count = (data.signups[fmtDateKey(d)]||[]).length;
-            const tt = count > 0 ? Math.ceil(count/PLAYERS_PER_TEE_TIME) : 0;
+            const tt = count > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(count/PLAYERS_PER_TEE_TIME)) : 0;
             const arrival = arrivalTimeFor(fmtDateKey(bookOpenDate));
             const arrivalPhrase = arrival ? `at ${arrival}` : '(time varies by season)';
             reminders.push(`<div class="ts-reminder"><span class="flag">🏌️</span><div>Head to the pro shop today ${arrivalPhrase} and request ${tt || '?'} tee time${tt===1?'':'s'} for ${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}.</div></div>`);
@@ -2239,7 +2259,7 @@
       const key = fmtDateKey(d);
       const signedEntries = data.signups[key] || [];
       const count = signedEntries.length;
-      const tt = count > 0 ? Math.ceil(count/PLAYERS_PER_TEE_TIME) : 0;
+      const tt = count > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(count/PLAYERS_PER_TEE_TIME)) : 0;
       const confirmedCount = data.confirmedTeeTimes[key];
       const capacity = capacityFor(key);
       const { confirmed, standby } = splitConfirmedStandby(signedEntries, capacity);
@@ -2972,7 +2992,7 @@
       const targetKey = fmtDateKey(target);
       const assigned = dutyForKey(targetKey);
       const targetCount = (data.signups[targetKey] || []).length;
-      const targetTT = targetCount > 0 ? Math.ceil(targetCount/PLAYERS_PER_TEE_TIME) : 0;
+      const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
       const closed = !!data.closures[targetKey];
       return { bookDate: d, bookKey: fmtDateKey(d), playDate: target, playKey: targetKey, assigned, tt: targetTT, closed };
     });
