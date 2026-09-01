@@ -588,6 +588,22 @@
     }catch(e){ /* best-effort */ }
   }
 
+  // Records a player-driven change (signup, drop-out, duty swap) into
+  // data.activityLog, so the nightly digest (sendDailyActivityDigest in the
+  // backend) can email the admin a list of what happened the day before. Just
+  // mutates local data — rides along with whatever saveData() call the caller
+  // already makes right after, no extra network round trip of its own.
+  function logActivity(type, extra){
+    if(!data.activityLog) data.activityLog = [];
+    const me = meId ? data.roster.find(p => p.id === meId) : null;
+    data.activityLog.push(Object.assign({
+      ts: Date.now(),
+      type,
+      playerId: meId,
+      playerName: me ? me.name : 'Unknown'
+    }, extra || {}));
+  }
+
   // Score entry and round setup go through their own narrow backend actions
   // (instead of the whole-blob saveData()) because during a round several
   // scorekeepers may be saving around the same time — the backend
@@ -635,7 +651,7 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, adminPin: null, playerPins: {} };
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, adminPin: null, playerPins: {}, activityLog: [] };
   let meId = null;
   let lastKnownModified = 0;
   let isAdmin = false;
@@ -709,6 +725,7 @@
     if(!data.holeHandicaps) data.holeHandicaps = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
+    if(!data.activityLog) data.activityLog = [];
     if(typeof data._lastModified !== 'number') data._lastModified = 0;
     lastKnownModified = data._lastModified;
     normalizeSignups();
@@ -2871,6 +2888,7 @@
     if(!targetPerson) return;
     const id = 'swap_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
     data.swapRequests[id] = { id, fromKey, toKey, requesterId: meId, targetId: targetPerson.id, status: 'pending' };
+    logActivity('swap_requested', { fromKey, toKey, otherName: targetPerson.name });
     await saveData();
     await showMessage('Request sent', `Asked ${targetPerson.name} to swap. You'll see it here once they respond.`);
   }
@@ -2894,6 +2912,8 @@
       data.duty[req.fromKey] = req.targetId;
       data.duty[req.toKey] = req.requesterId;
     }
+    const requester = data.roster.find(p => p.id === req.requesterId);
+    logActivity(accept ? 'swap_accepted' : 'swap_declined', { fromKey: req.fromKey, toKey: req.toKey, otherName: requester ? requester.name : 'someone' });
     delete data.swapRequests[id];
     await saveData();
     await showMessage(accept ? 'Swap complete' : 'Declined', accept ? 'The two dates have been swapped.' : "You've declined the swap.");
@@ -3563,9 +3583,11 @@
           const entry = { id: meId, holes: '18' };
           if(me && me.defaultTee) entry.tee = me.defaultTee;
           list.push(entry);
+          logActivity('signup', { dateKey: key });
         } else if(!wantIn && idx !== -1){
           const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           list.splice(idx,1);
+          logActivity('dropout', { dateKey: key });
           const afterConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
           if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
