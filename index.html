@@ -1941,12 +1941,14 @@
         const email = (entry && typeof entry === 'object' && entry.email) ? entry.email : null;
         const handicapIndex = (entry && typeof entry === 'object' && typeof entry.handicapIndex === 'number') ? entry.handicapIndex : null;
         const courseHandicaps = (entry && typeof entry === 'object' && entry.courseHandicaps && typeof entry.courseHandicaps === 'object') ? entry.courseHandicaps : null;
+        const defaultTee = (entry && typeof entry === 'object' && entry.defaultTee) ? entry.defaultTee : null;
         if(!nameToId[key]){
           const id = (entry && typeof entry === 'object' && entry.id) ? entry.id : ('p_' + Date.now() + '_' + Math.random().toString(36).slice(2,7));
           const newEntry = { id, name: String(name) };
           if(email) newEntry.email = email;
           if(handicapIndex !== null) newEntry.handicapIndex = handicapIndex;
           if(courseHandicaps) newEntry.courseHandicaps = courseHandicaps;
+          if(defaultTee) newEntry.defaultTee = defaultTee;
           data.roster.push(newEntry);
           nameToId[key] = id;
           addedPlayers++;
@@ -1956,9 +1958,10 @@
             existing.email = email;
             updatedEmails++;
           }
-          if(existing && (handicapIndex !== null || courseHandicaps)){
+          if(existing && (handicapIndex !== null || courseHandicaps || defaultTee)){
             if(handicapIndex !== null) existing.handicapIndex = handicapIndex;
             if(courseHandicaps) existing.courseHandicaps = courseHandicaps;
+            if(defaultTee) existing.defaultTee = defaultTee;
             updatedHandicaps++;
           }
         }
@@ -2515,7 +2518,12 @@
             <span class="ts-pin-status ${data.playerPins[p.id] ? 'set' : ''}">${data.playerPins[p.id] ? '🔒 PIN set' : 'No PIN'}</span>
             <button data-change-pin="${p.id}">${data.playerPins[p.id] ? 'Change PIN' : 'Set PIN'}</button>
             <button data-remove="${p.id}">Remove</button>
-          </div>`).join('') || `<p class="ts-empty">No players yet — add your first below.</p>`}
+          </div>`).join('') || `
+          <p class="ts-empty">No players yet.</p>
+          <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+            <button id="ts-import-snapshot-btn-empty">Import data snapshot</button>
+            <p style="margin:6px 0 0;">If a roster already exists elsewhere — e.g. the live app — paste its "Export data snapshot" (Data tab) here to bring in everyone at once, instead of adding players one by one below.</p>
+          </div>`}
         <div class="ts-add-row">
           <input type="text" placeholder="Player name" id="ts-new-name">
           <input type="email" placeholder="Email (optional)" id="ts-new-email">
@@ -3176,6 +3184,18 @@
     const importSnapshotBtn = document.getElementById('ts-import-snapshot-btn');
     if(importSnapshotBtn){
       importSnapshotBtn.onclick = async () => {
+        if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
+        await importPastedSnapshot();
+        render();
+      };
+    }
+
+    // Same import, offered as a shortcut right on the empty-roster screen so a
+    // freshly-set-up (or freshly-emptied) test app isn't stuck adding players
+    // one by one when a snapshot already exists to pull in instead.
+    const importSnapshotBtnEmpty = document.getElementById('ts-import-snapshot-btn-empty');
+    if(importSnapshotBtnEmpty){
+      importSnapshotBtnEmpty.onclick = async () => {
         if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
         await importPastedSnapshot();
         render();
