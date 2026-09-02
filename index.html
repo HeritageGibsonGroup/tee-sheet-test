@@ -1296,17 +1296,17 @@
   }
 
   // Standard USGA Course Handicap formula: Index × (Slope ÷ 113) + (Rating − Par),
-  // rounded to the nearest whole stroke. Par defaults to 72 (see the Tee ratings
-  // section) until an admin corrects it per tee. Used only when an admin hand-edits
-  // a Handicap Index or a tee's Par in Player Handicaps — a fresh Import data
+  // rounded to the nearest whole stroke. Par is a fixed 72 for every tee (confirmed
+  // against the club's own per-hole par card — front 36 + back 36). Used only when
+  // an admin hand-edits a Handicap Index in Player Handicaps — a fresh Import data
   // snapshot still writes each tee's Course Handicap straight from the imported
   // table, since that's presumed authoritative over anything computed here.
+  const COURSE_PAR = 72;
   function computedCourseHandicap(indexVal, tee){
     if(typeof indexVal !== 'number') return null;
     const r = data.teeRatings[tee];
     if(!r || typeof r.rating !== 'number' || typeof r.slope !== 'number') return null;
-    const par = typeof r.par === 'number' ? r.par : 72;
-    return Math.round(indexVal * (r.slope / 113) + (r.rating - par));
+    return Math.round(indexVal * (r.slope / 113) + (r.rating - COURSE_PAR));
   }
   function recomputeCourseHandicapsForPlayer(player){
     if(!player || typeof player.handicapIndex !== 'number') return;
@@ -1314,16 +1314,6 @@
     data.teeOptions.forEach(tee => {
       const ch = computedCourseHandicap(player.handicapIndex, tee);
       if(ch !== null) player.courseHandicaps[tee] = ch;
-    });
-  }
-  function recomputeCourseHandicapsForTee(tee){
-    data.roster.forEach(p => {
-      if(typeof p.handicapIndex !== 'number') return;
-      const ch = computedCourseHandicap(p.handicapIndex, tee);
-      if(ch !== null){
-        if(!p.courseHandicaps) p.courseHandicaps = {};
-        p.courseHandicaps[tee] = ch;
-      }
     });
   }
 
@@ -2712,14 +2702,7 @@
     }
     const teeRows = data.teeOptions.map(tee => {
       const r = data.teeRatings[tee] || {};
-      const par = typeof r.par === 'number' ? r.par : 72;
-      return `<div class="ts-closure-row">
-        <span class="ts-closure-date">${esc(tee)}</span>
-        <span class="ts-closure-status">Rating ${r.rating ?? '?'} / Slope ${r.slope ?? '?'}</span>
-        <label style="display:flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap;">Par
-          <input type="number" min="60" max="80" step="1" data-tee-par="${esc(tee)}" value="${par}" style="width:52px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
-        </label>
-      </div>`;
+      return `<div class="ts-closure-row"><span class="ts-closure-date">${esc(tee)}</span><span class="ts-closure-status">Rating ${r.rating ?? '?'} / Slope ${r.slope ?? '?'} / Par ${COURSE_PAR}</span></div>`;
     }).join('') || '<p class="ts-empty">No tee ratings loaded yet.</p>';
 
     const hhComplete = holeHandicapsComplete();
@@ -2813,7 +2796,7 @@
         ${staleBannerHtml}
         <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
           <span class="ts-import-row-label">Tee ratings</span>
-          <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update. Par defaults to 72 until you correct it — check it once against your scorecard, since it feeds every Course Handicap below.</p>
+          <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update.</p>
           ${teeRows}
         </div>
         <div class="ts-import-row">
@@ -3602,22 +3585,6 @@
           player.handicapIndex = Math.round(val * 10) / 10;
           recomputeCourseHandicapsForPlayer(player);
         }
-        data.handicapUpdatedAt = Date.now();
-        await saveData();
-        render();
-      });
-    });
-
-    document.querySelectorAll('[data-tee-par]').forEach(inp => {
-      inp.addEventListener('change', async () => {
-        if(!isAdmin) return;
-        const tee = inp.getAttribute('data-tee-par');
-        const raw = inp.value.trim();
-        const val = raw === '' ? NaN : parseInt(raw, 10);
-        if(isNaN(val) || val < 60 || val > 80){ await showMessage('Not valid', 'Par has to be a whole number, typically between 60 and 80.'); render(); return; }
-        if(!data.teeRatings[tee]) data.teeRatings[tee] = {};
-        data.teeRatings[tee].par = val;
-        recomputeCourseHandicapsForTee(tee);
         data.handicapUpdatedAt = Date.now();
         await saveData();
         render();
