@@ -660,7 +660,7 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, adminPin: null, playerPins: {}, activityLog: [] };
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holePars: {}, adminPin: null, playerPins: {}, activityLog: [] };
   let meId = null;
   let lastKnownModified = 0;
   let isAdmin = false;
@@ -744,6 +744,7 @@
     if(!data.teams) data.teams = {};
     if(!data.rounds) data.rounds = {};
     if(!data.holeHandicaps) data.holeHandicaps = {};
+    if(!data.holePars) data.holePars = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
     if(!data.activityLog) data.activityLog = [];
@@ -1075,9 +1076,11 @@
 
   // First time anyone signs in as a given player, they must set a 4-digit PIN before
   // proceeding — this protects their signups from anyone else picking their name.
-  async function forceSetPin(id){
+  // Also reused by reverifyIfNeeded() when an admin has reset a player's PIN, or the
+  // backend one went missing some other way — promptText lets that case explain why.
+  async function forceSetPin(id, promptText){
     while(true){
-      const entered = await askText('Set a 4-digit PIN', "This is your first time signing in as this player. Choose a 4-digit PIN — you'll need it again on other devices.");
+      const entered = await askText('Set a 4-digit PIN', promptText || "This is your first time signing in as this player. Choose a 4-digit PIN — you'll need it again on other devices.");
       if(entered === null) return false; // they backed out; stays unidentified, can retry anytime
       const trimmed = entered.trim();
       if(!/^\d{4}$/.test(trimmed)){
@@ -1090,6 +1093,22 @@
       await saveData();
       return true;
     }
+  }
+
+  // Runs once on load, for whoever this device already remembers as meId: a device
+  // that verified someone once stays trusted locally (verifiedPlayers) forever, even
+  // if their PIN later goes missing from the backend — whether an admin explicitly
+  // reset it (see the "Reset verification" button in League Roster) or a whole-data
+  // save happened to revert it. Re-checking here, every load, means League Roster's
+  // "PIN set" status and what a device actually requires can never drift apart again.
+  async function reverifyIfNeeded(){
+    if(!meId || isAdmin) return;
+    const me = data.roster.find(p => p.id === meId);
+    if(!me || me.isAdmin) return;
+    if(data.playerPins[meId]) return; // backend has a real PIN on file — already in sync
+    verifiedPlayers = verifiedPlayers.filter(vid => vid !== meId);
+    await persistVerified();
+    await forceSetPin(meId, "Your PIN needs to be set again — either it was reset, or this device's saved sign-in didn't match what's on file. Choose a new 4-digit PIN.");
   }
 
   // Runs once on load (and whenever no one's identified yet): proactively asks who's
@@ -1274,6 +1293,38 @@
     if(!player || !tee || !player.courseHandicaps) return null;
     const v = player.courseHandicaps[tee];
     return typeof v === 'number' ? v : null;
+  }
+
+  // Standard USGA Course Handicap formula: Index × (Slope ÷ 113) + (Rating − Par),
+  // rounded to the nearest whole stroke. Par defaults to 72 (see the Tee ratings
+  // section) until an admin corrects it per tee. Used only when an admin hand-edits
+  // a Handicap Index or a tee's Par in Player Handicaps — a fresh Import data
+  // snapshot still writes each tee's Course Handicap straight from the imported
+  // table, since that's presumed authoritative over anything computed here.
+  function computedCourseHandicap(indexVal, tee){
+    if(typeof indexVal !== 'number') return null;
+    const r = data.teeRatings[tee];
+    if(!r || typeof r.rating !== 'number' || typeof r.slope !== 'number') return null;
+    const par = typeof r.par === 'number' ? r.par : 72;
+    return Math.round(indexVal * (r.slope / 113) + (r.rating - par));
+  }
+  function recomputeCourseHandicapsForPlayer(player){
+    if(!player || typeof player.handicapIndex !== 'number') return;
+    if(!player.courseHandicaps) player.courseHandicaps = {};
+    data.teeOptions.forEach(tee => {
+      const ch = computedCourseHandicap(player.handicapIndex, tee);
+      if(ch !== null) player.courseHandicaps[tee] = ch;
+    });
+  }
+  function recomputeCourseHandicapsForTee(tee){
+    data.roster.forEach(p => {
+      if(typeof p.handicapIndex !== 'number') return;
+      const ch = computedCourseHandicap(p.handicapIndex, tee);
+      if(ch !== null){
+        if(!p.courseHandicaps) p.courseHandicaps = {};
+        p.courseHandicaps[tee] = ch;
+      }
+    });
   }
 
   function computeTeamsForDate(dateKey){
@@ -2053,6 +2104,12 @@
     if(Array.isArray(incoming.teeOptions) && incoming.teeOptions.length){
       data.teeOptions = incoming.teeOptions;
     }
+    if(typeof incoming.handicapEffectiveDate === 'string' && incoming.handicapEffectiveDate){
+      data.handicapEffectiveDate = incoming.handicapEffectiveDate;
+    }
+    if(typeof incoming.handicapUpdatedAt === 'number'){
+      data.handicapUpdatedAt = incoming.handicapUpdatedAt;
+    }
 
     // Hole handicaps (stroke index): course-wide, keyed by hole number — a
     // one-time setup import, so any hole present in the pasted file overwrites
@@ -2069,10 +2126,24 @@
       });
     }
 
+    // Par per hole: display only, same course-wide/one-time-setup shape as hole
+    // handicaps above.
+    let updatedHolePars = 0;
+    if(incoming.holePars && typeof incoming.holePars === 'object'){
+      Object.keys(incoming.holePars).forEach(h => {
+        const n = parseInt(h, 10);
+        const par = incoming.holePars[h];
+        if(n >= 1 && n <= 18 && typeof par === 'number' && par >= 3 && par <= 6){
+          data.holePars[String(n)] = par;
+          updatedHolePars++;
+        }
+      });
+    }
+
     const removedGhosts = normalizeSignups();
     if(updatedHandicaps > 0) data.handicapUpdatedAt = Date.now();
     await saveData();
-    let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}, and updated ${updatedHoleHandicaps} hole handicap${updatedHoleHandicaps===1?'':'s'}.`;
+    let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}, updated ${updatedHoleHandicaps} hole handicap${updatedHoleHandicaps===1?'':'s'}, and updated ${updatedHolePars} hole par${updatedHolePars===1?'':'s'}.`;
     if(removedGhosts > 0) msg += ` Also cleaned up ${removedGhosts} stale signup${removedGhosts===1?'':'s'} left over from removed players.`;
     if(unmatchedNames.length){
       msg += ` Couldn't match: ${[...new Set(unmatchedNames)].join(', ')} — check they're spelled the same as in the roster.`;
@@ -2537,6 +2608,7 @@
             <label class="ts-admin-toggle-label"><input type="checkbox" data-admin-toggle="${p.id}" ${p.isAdmin ? 'checked' : ''}> Admin</label>
             <span class="ts-pin-status ${data.playerPins[p.id] ? 'set' : ''}">${data.playerPins[p.id] ? '🔒 PIN set' : 'No PIN'}</span>
             <button data-change-pin="${p.id}">${data.playerPins[p.id] ? 'Change PIN' : 'Set PIN'}</button>
+            ${data.playerPins[p.id] ? `<button data-reset-verification="${p.id}" title="Clears their PIN so they're required to set a new one the next time they open the app on any device">Reset verification</button>` : ''}
             <button data-remove="${p.id}">Remove</button>
           </div>`).join('') || `
           <p class="ts-empty">No players yet.</p>
@@ -2640,7 +2712,14 @@
     }
     const teeRows = data.teeOptions.map(tee => {
       const r = data.teeRatings[tee] || {};
-      return `<div class="ts-closure-row"><span class="ts-closure-date">${esc(tee)}</span><span class="ts-closure-status">Rating ${r.rating ?? '?'} / Slope ${r.slope ?? '?'}</span></div>`;
+      const par = typeof r.par === 'number' ? r.par : 72;
+      return `<div class="ts-closure-row">
+        <span class="ts-closure-date">${esc(tee)}</span>
+        <span class="ts-closure-status">Rating ${r.rating ?? '?'} / Slope ${r.slope ?? '?'}</span>
+        <label style="display:flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap;">Par
+          <input type="number" min="60" max="80" step="1" data-tee-par="${esc(tee)}" value="${par}" style="width:52px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
+        </label>
+      </div>`;
     }).join('') || '<p class="ts-empty">No tee ratings loaded yet.</p>';
 
     const hhComplete = holeHandicapsComplete();
@@ -2662,14 +2741,43 @@
           </div>`).join('')}
       </div>`;
 
+    // Par per hole — display only, shown as a reference row on the Scoring & Bets
+    // score-entry grid. Doesn't feed into strokes/handicap math anywhere (that's all
+    // driven by Course Handicap and the stroke-index ranks above), just makes it
+    // easier to see what a player shot relative to par while entering scores.
+    const parRowHtml = (start) => `
+      <div class="ts-hh-row">
+        ${Array.from({ length: 9 }, (_, i) => start + i).map(h => `
+          <div class="ts-hh-cell">
+            <label>Hole ${h}</label>
+            <input type="number" min="3" max="6" step="1" data-hole-par="${h}" value="${typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : ''}">
+          </div>`).join('')}
+      </div>`;
+    const parFilledCount = Array.from({ length: 18 }, (_, i) => i + 1).filter(h => typeof data.holePars[String(h)] === 'number').length;
+    const parTotal = Array.from({ length: 18 }, (_, i) => i + 1).reduce((sum, h) => sum + (typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : 0), 0);
+    const parStatusHtml = parFilledCount === 18
+      ? `<p style="margin:6px 0 0; color:var(--fairway); font-weight:600;">✓ All 18 set — course par ${parTotal}.</p>`
+      : parFilledCount === 0
+        ? `<p style="margin:6px 0 0;">Not set yet.</p>`
+        : `<p style="margin:6px 0 0;">${parFilledCount} of 18 entered so far.</p>`;
+
+    // The effective date you set below is the date of record once it exists — the
+    // staleness check counts from it instead of from the last import timestamp. Only
+    // falls back to the import timestamp for a site that hasn't set one yet.
     const STALE_DAYS = 15;
     let staleBannerHtml = '';
-    if(!data.handicapUpdatedAt){
-      staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>No handicap update on record yet</b> — import a fresh snapshot to get started.</div>`;
+    let effectiveDateMs = null;
+    if(data.handicapEffectiveDate){
+      const parsed = new Date(data.handicapEffectiveDate + 'T00:00:00');
+      if(!isNaN(parsed.getTime())) effectiveDateMs = parsed.getTime();
+    }
+    const staleReferenceMs = effectiveDateMs !== null ? effectiveDateMs : data.handicapUpdatedAt;
+    if(!staleReferenceMs){
+      staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>No handicap update on record yet</b> — import a fresh snapshot, or set the effective date below, to get started.</div>`;
     } else {
-      const daysSince = Math.floor((Date.now() - data.handicapUpdatedAt) / (1000*60*60*24));
+      const daysSince = Math.floor((Date.now() - staleReferenceMs) / (1000*60*60*24));
       if(daysSince > STALE_DAYS){
-        staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>Handicaps haven't been updated in ${daysSince} days</b> — since these update about twice a month, it may be time for a fresh import.</div>`;
+        staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>Handicaps haven't been updated in ${daysSince} days</b> — since these update about twice a month, it may be time for a fresh update.</div>`;
       }
     }
 
@@ -2681,7 +2789,6 @@
     const lowestCH = withCourseHcp.length ? Math.min(...withCourseHcp.map(x => x.ch)) : null;
 
     const playerRows = sortedRoster().map(p => {
-      const hcp = typeof p.handicapIndex === 'number' ? p.handicapIndex.toFixed(1) : '—';
       const courseHcp = (p.defaultTee && p.courseHandicaps && typeof p.courseHandicaps[p.defaultTee] === 'number')
         ? p.courseHandicaps[p.defaultTee]
         : null;
@@ -2689,7 +2796,9 @@
       return `
         <div class="ts-roster-row" data-hpid="${p.id}">
           <span style="flex:1;">${esc(p.name)}</span>
-          <span style="width:70px; font-family:'IBM Plex Mono',monospace; font-size:12px;">HI: ${hcp}</span>
+          <label style="display:flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap;">HI
+            <input type="number" step="0.1" min="-10" max="54" data-handicap-index="${p.id}" value="${typeof p.handicapIndex === 'number' ? p.handicapIndex : ''}" placeholder="—" style="width:60px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
+          </label>
           <select data-default-tee="${p.id}" style="flex:1; font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
             <option value="">No default tee</option>
             ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${p.defaultTee===tee?'selected':''}>${esc(tee)}</option>`).join('')}
@@ -2704,7 +2813,7 @@
         ${staleBannerHtml}
         <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
           <span class="ts-import-row-label">Tee ratings</span>
-          <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update.</p>
+          <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update. Par defaults to 72 until you correct it — check it once against your scorecard, since it feeds every Course Handicap below.</p>
           ${teeRows}
         </div>
         <div class="ts-import-row">
@@ -2715,8 +2824,18 @@
           ${hhStatusHtml}
         </div>
         <div class="ts-import-row">
+          <span class="ts-import-row-label">Par per hole</span>
+          <p style="margin:0 0 10px;">Display only — shown as a reference row on the Scoring &amp; Bets score-entry grid. Doesn't affect strokes or handicaps.</p>
+          ${parRowHtml(1)}
+          ${parRowHtml(10)}
+          ${parStatusHtml}
+        </div>
+        <div class="ts-import-row">
           <span class="ts-import-row-label">Player handicaps</span>
-          <p style="margin:0 0 10px;">Handicap Index (HI) updates about twice a month — paste a fresh update via Import data snapshot on the Data tab. Set each player's default tee here. "Strokes" is their course handicap at that tee; "S.O." is how many strokes they get relative to whoever in the whole roster has the lowest course handicap (who plays to scratch).</p>
+          <p style="margin:0 0 10px;">Handicap Index (HI) updates about twice a month — paste a fresh update via Import data snapshot on the Data tab, or edit an index by hand right here. Editing HI recalculates that player's Course Handicap at every tee automatically (using Rating, Slope, and the Par above). Set each player's default tee here too. "Strokes" is their course handicap at that tee; "S.O." is how many strokes they get relative to whoever in the whole roster has the lowest course handicap (who plays to scratch).</p>
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; margin:0 0 12px;">Handicaps effective as of
+            <input type="date" data-handicap-effective-date value="${data.handicapEffectiveDate || ''}" style="font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
+          </label>
           ${playerRows || '<p class="ts-empty">No players yet.</p>'}
         </div>
         <div class="ts-import-row">
@@ -2816,6 +2935,7 @@
               <thead>
                 <tr><th></th><th colspan="${HOLES_PER_SERIES}">Series 1</th><th colspan="${HOLES_PER_SERIES}">Series 2</th><th colspan="${HOLES_PER_SERIES}">Series 3</th></tr>
                 <tr><th></th>${flatHoles.map(h => `<th>${h}</th>`).join('')}</tr>
+                ${Object.keys(data.holePars).length ? `<tr class="ts-par-row"><th>Par</th>${flatHoles.map(h => `<th>${typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : ''}</th>`).join('')}</tr>` : ''}
               </thead>
               <tbody>${rowsHtml}</tbody>
             </table>
@@ -3197,7 +3317,7 @@
     if(exportBtn){
       exportBtn.onclick = async () => {
         if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
-        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps };
+        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps, holePars: data.holePars, handicapUpdatedAt: data.handicapUpdatedAt, handicapEffectiveDate: data.handicapEffectiveDate };
         await showExportModal('Export data snapshot', 'Copy this and save it somewhere safe, or paste it into the test app.', JSON.stringify(snapshot));
       };
     }
@@ -3467,6 +3587,53 @@
       });
     });
 
+    document.querySelectorAll('[data-handicap-index]').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        const pid = inp.getAttribute('data-handicap-index');
+        const player = data.roster.find(p => p.id === pid);
+        if(!player) return;
+        const raw = inp.value.trim();
+        if(raw === ''){
+          delete player.handicapIndex;
+        } else {
+          const val = parseFloat(raw);
+          if(isNaN(val) || val < -10 || val > 54){ await showMessage('Not valid', 'Handicap Index has to be a number, typically between -10 and 54.'); render(); return; }
+          player.handicapIndex = Math.round(val * 10) / 10;
+          recomputeCourseHandicapsForPlayer(player);
+        }
+        data.handicapUpdatedAt = Date.now();
+        await saveData();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-tee-par]').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        const tee = inp.getAttribute('data-tee-par');
+        const raw = inp.value.trim();
+        const val = raw === '' ? NaN : parseInt(raw, 10);
+        if(isNaN(val) || val < 60 || val > 80){ await showMessage('Not valid', 'Par has to be a whole number, typically between 60 and 80.'); render(); return; }
+        if(!data.teeRatings[tee]) data.teeRatings[tee] = {};
+        data.teeRatings[tee].par = val;
+        recomputeCourseHandicapsForTee(tee);
+        data.handicapUpdatedAt = Date.now();
+        await saveData();
+        render();
+      });
+    });
+
+    const effDateInput = document.querySelector('[data-handicap-effective-date]');
+    if(effDateInput){
+      effDateInput.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        data.handicapEffectiveDate = effDateInput.value || null;
+        await saveData();
+        render();
+      });
+    }
+
     document.querySelectorAll('[data-hole-handicap]').forEach(inp => {
       inp.addEventListener('change', async () => {
         if(!isAdmin) return;
@@ -3476,6 +3643,20 @@
         if(val === null){ delete data.holeHandicaps[h]; }
         else if(isNaN(val) || val < 1 || val > 18){ await showMessage('Not valid', 'Hole handicap has to be a whole number from 1 to 18.'); render(); return; }
         else { data.holeHandicaps[h] = val; }
+        await saveData();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-hole-par]').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        const h = inp.getAttribute('data-hole-par');
+        const raw = inp.value.trim();
+        const val = raw === '' ? null : parseInt(raw, 10);
+        if(val === null){ delete data.holePars[h]; }
+        else if(isNaN(val) || val < 3 || val > 6){ await showMessage('Not valid', 'Par has to be a whole number from 3 to 6.'); render(); return; }
+        else { data.holePars[h] = val; }
         await saveData();
         render();
       });
@@ -3505,6 +3686,25 @@
         if(!/^\d{4}$/.test(trimmed)){ await showMessage('Needs to be 4 digits', 'Enter exactly 4 numbers, like 1234.'); return; }
         data.playerPins[pid] = trimmed;
         await saveData();
+        render();
+      });
+    });
+
+    // Clears a player's PIN so League Roster correctly shows "No PIN" again, and so
+    // reverifyIfNeeded() forces them through forceSetPin the next time their app loads
+    // on any device — even a device that already trusted them locally, since that
+    // trust is now checked against the backend PIN actually existing.
+    document.querySelectorAll('[data-reset-verification]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if(!isAdmin) return;
+        const pid = btn.getAttribute('data-reset-verification');
+        const player = data.roster.find(p => p.id === pid);
+        if(!player) return;
+        const confirmed = await askConfirm('Reset verification?', `${player.name} will be required to set a new PIN the next time they open the app on any device. Continue?`, 'Reset verification', 'Cancel');
+        if(!confirmed) return;
+        delete data.playerPins[pid];
+        await saveData();
+        await showMessage('Verification reset', `${player.name} will be asked to set a new PIN next time they open the app.`);
         render();
       });
     });
@@ -3836,6 +4036,7 @@
   (async function init(){
     await loadData();
     render();
+    await reverifyIfNeeded();
     await autoIdentifyIfNeeded();
     render();
   })();
