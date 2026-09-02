@@ -2357,7 +2357,7 @@
       // by signup order as a placeholder (and alerts the admin, see notifyShortfall)
       // so the group can actually decide. This note keeps that from reading as final.
       const namesHtml = capacity != null
-        ? `<div class="ts-chip-group-label">Playing (${confirmed.length}/${capacity})</div>${chipsFor(sortByLastName(confirmed))}
+        ? `<div class="ts-chip-group-label">Playing (${confirmed.length})</div>${chipsFor(sortByLastName(confirmed))}
            ${standby.length ? `<div class="ts-chip-group-label standby">Standby (${standby.length})</div>${chipsFor(sortByLastName(standby))}
            <div class="ts-note" style="border-top:none; padding-top:0; margin-top:4px;">Sorted by signup order for now — who's actually sitting out for ${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()} hasn't been decided yet.</div>` : ''}`
         : chipsFor(sortByLastName(signedEntries));
@@ -2406,7 +2406,7 @@
       // badge still shows the confirmed count once it's entered there.
 
       const countBadge = capacity != null
-        ? `${confirmed.length}/${capacity} confirmed${standby.length ? ` <span class="ts-standby-count">+${standby.length} standby</span>` : ''}`
+        ? `${confirmed.length} confirmed${standby.length ? ` <span class="ts-standby-count">+${standby.length} standby</span>` : ''}`
         : `${count} signed up`;
       const teeTimesBadge = confirmedCount
         ? `${confirmedCount} confirmed`
