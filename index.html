@@ -1826,9 +1826,23 @@
     return diffs;
   }
 
-  function showReconcileModal(diffs){
+  function fmtWhen(ts){
+    return new Date(ts).toLocaleString(undefined, { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+  }
+
+  function showReconcileModal(diffs, meta){
     return new Promise(resolve => {
       const modalRoot = document.getElementById('ts-modal-root');
+      // A rough "which one's newer" hint — both sides carry a single whole-data save
+      // time, not a per-field one, so this can only say which snapshot as a whole was
+      // saved more recently, not which specific answer below is the fresher one.
+      const hereTs = meta && meta.hereModified;
+      const pastedTs = meta && meta.pastedModified;
+      const recencyHtml = (hereTs || pastedTs) ? `
+        <div class="ts-note" style="margin:0 0 10px;">
+          ${hereTs ? `This app last saved: ${fmtWhen(hereTs)}${(hereTs && pastedTs && hereTs > pastedTs) ? ' — more recent' : ''}` : 'This app: no save time on record'}<br>
+          ${pastedTs ? `Pasted data last saved: ${fmtWhen(pastedTs)}${(hereTs && pastedTs && pastedTs > hereTs) ? ' — more recent' : ''}` : 'Pasted data: no save time on record (exported before this was added)'}
+        </div>` : '';
       const selections = {};
       diffs.forEach(d => { selections[d.id] = 'here'; });
 
@@ -1863,6 +1877,7 @@
           <div class="ts-modal-box ts-modal-box-wide ts-modal-box-tall">
             <h4>Reconcile differences</h4>
             <p>For each item, pick which version to keep. Nothing changes until you click Apply.</p>
+            ${recencyHtml}
             <div class="ts-preview-scroll" id="ts-preview-scroll-inner">${rowsHtml()}</div>
             <div class="ts-modal-actions">
               <button class="ts-modal-cancel" id="ts-modal-cancel">Cancel</button>
@@ -1898,7 +1913,7 @@
       await showMessage('No differences', 'This app and the pasted data match exactly.');
       return;
     }
-    const result = await showReconcileModal(diffs);
+    const result = await showReconcileModal(diffs, { hereModified: data._lastModified, pastedModified: incoming._lastModified });
     if(result === false) return;
     await saveData();
     render();
@@ -3410,7 +3425,7 @@
     if(exportBtn){
       exportBtn.onclick = async () => {
         if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
-        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps, holePars: data.holePars, handicapUpdatedAt: data.handicapUpdatedAt, handicapEffectiveDate: data.handicapEffectiveDate };
+        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps, holePars: data.holePars, handicapUpdatedAt: data.handicapUpdatedAt, handicapEffectiveDate: data.handicapEffectiveDate, _lastModified: data._lastModified };
         await showExportModal('Export data snapshot', 'Copy this and save it somewhere safe, or paste it into the test app.', JSON.stringify(snapshot));
       };
     }
