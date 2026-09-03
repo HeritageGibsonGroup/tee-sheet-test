@@ -2518,7 +2518,7 @@
           ${generatedTeams.teams.map((team, i) => `
             <div class="ts-team-row">
               <span class="ts-team-num">Team ${i+1}</span>
-              ${team.map(p => `<span class="name-chip">${esc(p.name)}${p.courseHandicap !== null ? ` <span class="ts-team-so">(HC ${p.courseHandicap}${p.strokesOff !== null ? `, Strokes off ${p.strokesOff}` : ''})</span>` : ''}</span>`).join('')}
+              ${team.map(p => `<span class="name-chip">${esc(p.name)}${typeof p.courseHandicap === 'number' ? ` <span class="ts-team-so">(HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''})</span>` : ''}</span>`).join('')}
             </div>`).join('')}
           ${generatedTeams.notInBet && generatedTeams.notInBet.length ? `
             <div class="ts-team-row">
@@ -3606,6 +3606,43 @@
       };
     }
 
+    // The same lowest-course-handicap baseline computeTeamsForDate would use for
+    // this date, re-derived from that day's actual 18-hole signups rather than
+    // whoever happens to be on a team right now — so a player swapped onto a team
+    // gets a strokesOff that matches what a fresh generation would've given them,
+    // whether or not their "Not in the bet" entry already had one computed (older
+    // entries, from before that was tracked, didn't).
+    function lowestCourseHandicapForDate(dateKey){
+      const entries = data.signups[dateKey] || [];
+      const capacity = capacityFor(dateKey);
+      const { confirmed } = splitConfirmedStandby(entries, capacity);
+      const playing = confirmed.length ? confirmed : entries;
+      const chs = playing.filter(e => e.holes === '18').map(entry => {
+        const p = data.roster.find(r => r.id === entry.id);
+        if(!p) return null;
+        const tee = entry.tee || p.defaultTee || null;
+        return courseHandicapFor(p, tee);
+      }).filter(v => typeof v === 'number');
+      return chs.length ? Math.min(...chs) : 0;
+    }
+
+    // Recomputes tee/courseHandicap/strokesOff fresh for a player about to land on
+    // a team — heals a swap-in from an older "Not in the bet" entry that predates
+    // those fields being tracked there (shows up as undefined HC/S.O. otherwise).
+    function recomputedForTeamSlot(dateKey, playerLite){
+      const rosterPlayer = data.roster.find(r => r.id === playerLite.id);
+      const tee = playerLite.tee || (rosterPlayer && rosterPlayer.defaultTee) || null;
+      const ch = rosterPlayer ? courseHandicapFor(rosterPlayer, tee) : (typeof playerLite.courseHandicap === 'number' ? playerLite.courseHandicap : null);
+      const lowestCH = lowestCourseHandicapForDate(dateKey);
+      return {
+        id: playerLite.id,
+        name: playerLite.name,
+        tee,
+        courseHandicap: typeof ch === 'number' ? ch : null,
+        strokesOff: typeof ch === 'number' ? (ch - lowestCH) : null
+      };
+    }
+
     // Finds where a player currently sits — on one of today's teams, or on the
     // "Not in the bet" bench — so the swap handler below can trade between either
     // kind of slot, not just team-to-team.
@@ -3649,10 +3686,14 @@
         // them, whether they're moving team-to-team or off the bench onto a team.
         // Whichever one lands on the bench needs a "not in the bet" reason to show
         // there — the one coming FROM the bench already has one; a player coming
-        // straight off a team gets a plain "Swapped out" instead.
+        // straight off a team gets a plain "Swapped out" instead. Whichever one
+        // lands on a TEAM gets its handicap fields freshly computed (see
+        // recomputedForTeamSlot above), so a swap-in never shows undefined HC/S.O.
         const playerA = slotA.list[slotA.index], playerB = slotB.list[slotB.index];
-        const outgoingToSlotA = slotA.kind === 'notInBet' ? Object.assign({}, playerB, { reason: playerB.reason || 'Swapped out' }) : playerB;
-        const outgoingToSlotB = slotB.kind === 'notInBet' ? Object.assign({}, playerA, { reason: playerA.reason || 'Swapped out' }) : playerA;
+        let outgoingToSlotA = slotA.kind === 'notInBet' ? Object.assign({}, playerB, { reason: playerB.reason || 'Swapped out' }) : playerB;
+        let outgoingToSlotB = slotB.kind === 'notInBet' ? Object.assign({}, playerA, { reason: playerA.reason || 'Swapped out' }) : playerA;
+        if(slotA.kind === 'team') outgoingToSlotA = recomputedForTeamSlot(scoringSelectedDate, outgoingToSlotA);
+        if(slotB.kind === 'team') outgoingToSlotB = recomputedForTeamSlot(scoringSelectedDate, outgoingToSlotB);
         slotA.list[slotA.index] = outgoingToSlotA;
         slotB.list[slotB.index] = outgoingToSlotB;
         await saveData();
