@@ -776,6 +776,30 @@
     return removedGhosts;
   }
 
+  // Self-heal: any already-saved team member whose courseHandicap/strokesOff were
+  // never computed at all — e.g. an old "Not in the bet" entry swapped onto a team
+  // before that swap-in logic filled those fields in — gets them recomputed here,
+  // the same way a fresh team generation would. Only touches entries missing the
+  // fields outright (an explicit null, once already computed, is left alone — that
+  // means "known to have no handicap," not "never checked"), so this doesn't keep
+  // re-triggering a save for players who genuinely don't have one on file. Returns
+  // how many players were healed, so callers can surface or act on that.
+  function normalizeTeams(){
+    let healed = 0;
+    Object.keys(data.teams).forEach(dateKey => {
+      const info = data.teams[dateKey];
+      if(!info || !Array.isArray(info.teams)) return;
+      info.teams.forEach(team => {
+        team.forEach((p, idx) => {
+          if(!p || ('courseHandicap' in p && 'strokesOff' in p)) return;
+          team[idx] = recomputedForTeamSlot(dateKey, p);
+          healed++;
+        });
+      });
+    });
+    return healed;
+  }
+
   async function loadData(){
     try{
       const fetched = await fetchSharedData();
@@ -805,6 +829,7 @@
     if(typeof data._lastModified !== 'number') data._lastModified = 0;
     lastKnownModified = data._lastModified;
     const removedGhosts = normalizeSignups();
+    const healedTeams = normalizeTeams();
     try{ meId = localStorage.getItem(ME_KEY) || null; }catch(e){ meId = null; }
     try{ isSuperAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isSuperAdmin = false; }
     isAdmin = isSuperAdmin;
@@ -830,10 +855,11 @@
       const ver = localStorage.getItem(VERIFIED_KEY);
       verifiedPlayers = ver ? JSON.parse(ver) : [];
     }catch(e){ verifiedPlayers = []; }
-    // Self-heal: if this load turned up ghost signups, persist the cleanup in the
-    // background so the fix sticks for everyone, not just this client's view.
-    // Fire-and-forget — never block the first paint on this.
-    if(removedGhosts > 0){ saveData().catch(()=>{}); }
+    // Self-heal: if this load turned up ghost signups or teams missing computed
+    // handicap fields, persist the cleanup in the background so the fix sticks for
+    // everyone, not just this client's view. Fire-and-forget — never block the
+    // first paint on this.
+    if(removedGhosts > 0 || healedTeams > 0){ saveData().catch(()=>{}); }
   }
 
   // Before writing, check whether the server's data has changed since we last
@@ -1490,6 +1516,45 @@
     });
 
     return { teams, notInBet: [...nineHoleOut, ...oddOneOut], generatedAt: new Date().toISOString() };
+  }
+
+  // The same lowest-course-handicap baseline computeTeamsForDate would use for
+  // this date, re-derived from that day's actual 18-hole signups rather than
+  // whoever happens to be on a team right now — so a player swapped onto a team
+  // gets a strokesOff that matches what a fresh generation would've given them,
+  // whether or not their "Not in the bet" entry already had one computed (older
+  // entries, from before that was tracked, didn't). Also used by normalizeTeams()
+  // above to self-heal any already-saved team missing these fields.
+  function lowestCourseHandicapForDate(dateKey){
+    const entries = data.signups[dateKey] || [];
+    const capacity = capacityFor(dateKey);
+    const { confirmed } = splitConfirmedStandby(entries, capacity);
+    const playing = confirmed.length ? confirmed : entries;
+    const chs = playing.filter(e => e.holes === '18').map(entry => {
+      const p = data.roster.find(r => r.id === entry.id);
+      if(!p) return null;
+      const tee = entry.tee || p.defaultTee || null;
+      return courseHandicapFor(p, tee);
+    }).filter(v => typeof v === 'number');
+    return chs.length ? Math.min(...chs) : 0;
+  }
+
+  // Recomputes tee/courseHandicap/strokesOff fresh for a player about to land on
+  // a team — heals a swap-in (or an already-saved team, via normalizeTeams() above)
+  // from an older "Not in the bet" entry that predates those fields being tracked
+  // there (shows up as undefined HC/S.O. otherwise).
+  function recomputedForTeamSlot(dateKey, playerLite){
+    const rosterPlayer = data.roster.find(r => r.id === playerLite.id);
+    const tee = playerLite.tee || (rosterPlayer && rosterPlayer.defaultTee) || null;
+    const ch = rosterPlayer ? courseHandicapFor(rosterPlayer, tee) : (typeof playerLite.courseHandicap === 'number' ? playerLite.courseHandicap : null);
+    const lowestCH = lowestCourseHandicapForDate(dateKey);
+    return {
+      id: playerLite.id,
+      name: playerLite.name,
+      tee,
+      courseHandicap: typeof ch === 'number' ? ch : null,
+      strokesOff: typeof ch === 'number' ? (ch - lowestCH) : null
+    };
   }
 
   function confirmedTeeTimesCountFor(dateKey){
@@ -3603,43 +3668,6 @@
       unlockScoringBtn.onclick = async () => {
         const ok = await requireAdmin();
         if(ok) render();
-      };
-    }
-
-    // The same lowest-course-handicap baseline computeTeamsForDate would use for
-    // this date, re-derived from that day's actual 18-hole signups rather than
-    // whoever happens to be on a team right now — so a player swapped onto a team
-    // gets a strokesOff that matches what a fresh generation would've given them,
-    // whether or not their "Not in the bet" entry already had one computed (older
-    // entries, from before that was tracked, didn't).
-    function lowestCourseHandicapForDate(dateKey){
-      const entries = data.signups[dateKey] || [];
-      const capacity = capacityFor(dateKey);
-      const { confirmed } = splitConfirmedStandby(entries, capacity);
-      const playing = confirmed.length ? confirmed : entries;
-      const chs = playing.filter(e => e.holes === '18').map(entry => {
-        const p = data.roster.find(r => r.id === entry.id);
-        if(!p) return null;
-        const tee = entry.tee || p.defaultTee || null;
-        return courseHandicapFor(p, tee);
-      }).filter(v => typeof v === 'number');
-      return chs.length ? Math.min(...chs) : 0;
-    }
-
-    // Recomputes tee/courseHandicap/strokesOff fresh for a player about to land on
-    // a team — heals a swap-in from an older "Not in the bet" entry that predates
-    // those fields being tracked there (shows up as undefined HC/S.O. otherwise).
-    function recomputedForTeamSlot(dateKey, playerLite){
-      const rosterPlayer = data.roster.find(r => r.id === playerLite.id);
-      const tee = playerLite.tee || (rosterPlayer && rosterPlayer.defaultTee) || null;
-      const ch = rosterPlayer ? courseHandicapFor(rosterPlayer, tee) : (typeof playerLite.courseHandicap === 'number' ? playerLite.courseHandicap : null);
-      const lowestCH = lowestCourseHandicapForDate(dateKey);
-      return {
-        id: playerLite.id,
-        name: playerLite.name,
-        tee,
-        courseHandicap: typeof ch === 'number' ? ch : null,
-        strokesOff: typeof ch === 'number' ? (ch - lowestCH) : null
       };
     }
 
