@@ -1417,9 +1417,16 @@
 
     // Only full 18-hole rounds count toward the team bet.
     const eighteenHoleEntries = playing.filter(e => e.holes === '18');
+    // Nine-hole players don't play in today's bet, but the "Not in the bet" list
+    // doubles as a bench an admin can manually swap someone in from (see the Swap
+    // control in Scoring & Bets) — so their handicap info is computed here too,
+    // ready the moment they're pulled onto a team.
     const nineHoleOut = playing.filter(e => e.holes !== '18').map(entry => {
       const p = data.roster.find(r => r.id === entry.id);
-      return p ? { id: p.id, name: p.name, reason: `Playing ${HOLES_LABEL[entry.holes] || 'nine'}` } : null;
+      if(!p) return null;
+      const tee = entry.tee || p.defaultTee || null;
+      const ch = courseHandicapFor(p, tee);
+      return { id: p.id, name: p.name, tee, courseHandicap: ch, reason: `Playing ${HOLES_LABEL[entry.holes] || 'nine'}` };
     }).filter(Boolean);
 
     let players = eighteenHoleEntries.map(entry => {
@@ -1432,9 +1439,15 @@
 
     if(players.length === 0 && nineHoleOut.length === 0) return null;
 
+    // lowestCH stays based on just the 18-hole field, same as before — nine-hole
+    // players' strokesOff below is measured against that same baseline, but they
+    // don't get a vote in setting it.
     const withCH = players.filter(x => x.courseHandicap !== null);
     const lowestCH = withCH.length ? Math.min(...withCH.map(x => x.courseHandicap)) : 0;
     players.forEach(p => {
+      p.strokesOff = (p.courseHandicap !== null) ? (p.courseHandicap - lowestCH) : null;
+    });
+    nineHoleOut.forEach(p => {
       p.strokesOff = (p.courseHandicap !== null) ? (p.courseHandicap - lowestCH) : null;
     });
 
@@ -1463,7 +1476,7 @@
       const cutCount = sorted.length - usable;
       const cut = bySignupOrder.slice(-cutCount);
       const cutIds = new Set(cut.map(p => p.id));
-      cut.forEach(p => oddOneOut.push({ id: p.id, name: p.name, reason: 'Odd numbers — sitting out of the bet today' }));
+      cut.forEach(p => oddOneOut.push(Object.assign({}, p, { reason: 'Odd numbers — sitting out of the bet today' })));
       eligible = sorted.filter(p => !cutIds.has(p.id));
     }
 
@@ -2988,13 +3001,18 @@
     const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
 
     // Manual swap: lets the admin trade two players between teams — e.g. when a
-    // couple of guys ask to play together — without touching anyone's own
-    // handicap/strokes math, which stays attached to the player, not the team.
-    // Only offered when there's more than one team to swap between.
+    // couple of guys ask to play together — or bring in someone who's currently
+    // not in the bet (nine-hole players, or whoever got cut for odd numbers) to
+    // take a team spot instead, without touching anyone's own handicap/strokes
+    // math, which stays attached to the player, not the team or the bench.
+    // Only offered when there's actually something to swap: more than one team,
+    // or at least one team plus someone sitting out to swap in.
     const swapOptionsHtml = teamsInfo.teams.map((team, ti) =>
       team.map(p => `<option value="${p.id}">Team ${ti+1} — ${esc(p.name)}</option>`).join('')
-    ).join('');
-    const swapRowHtml = teamsInfo.teams.length > 1 ? `
+    ).join('') + (teamsInfo.notInBet.length ? `<optgroup label="Not in the bet">${
+      teamsInfo.notInBet.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')
+    }</optgroup>` : '');
+    const swapRowHtml = (teamsInfo.teams.length > 1 || (teamsInfo.teams.length > 0 && teamsInfo.notInBet.length > 0)) ? `
       <div class="ts-import-row">
         <span class="ts-import-row-label">Swap players between teams</span>
         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px;">
@@ -3007,7 +3025,7 @@
           </select>
           <button id="ts-swap-players-btn">Swap</button>
         </div>
-        <p style="margin:8px 0 0;">Trades these two players' teams for ${esc(dateLabel)} only — doesn't change their handicap or strokes, just who they're grouped with. Regenerating teams for this date will undo any swaps.</p>
+        <p style="margin:8px 0 0;">Trades these two players' spots for ${esc(dateLabel)} only — doesn't change either player's handicap or strokes, just who's grouped where (or in vs. out of the bet). Regenerating teams for this date will undo any swaps.</p>
       </div>` : '';
 
     const round = ensureRoundDefaults(dateKey);
@@ -3588,6 +3606,19 @@
       };
     }
 
+    // Finds where a player currently sits — on one of today's teams, or on the
+    // "Not in the bet" bench — so the swap handler below can trade between either
+    // kind of slot, not just team-to-team.
+    function findTeamsInfoSlot(teamsInfo, id){
+      for(let ti = 0; ti < teamsInfo.teams.length; ti++){
+        const idx = teamsInfo.teams[ti].findIndex(p => p.id === id);
+        if(idx !== -1) return { list: teamsInfo.teams[ti], index: idx, kind: 'team', teamIndex: ti };
+      }
+      const ni = teamsInfo.notInBet.findIndex(p => p.id === id);
+      if(ni !== -1) return { list: teamsInfo.notInBet, index: ni, kind: 'notInBet' };
+      return null;
+    }
+
     const swapPlayersBtn = document.getElementById('ts-swap-players-btn');
     if(swapPlayersBtn){
       swapPlayersBtn.onclick = async () => {
@@ -3595,31 +3626,35 @@
         const selB = document.getElementById('ts-swap-player-b');
         const idA = selA.value, idB = selB.value;
         if(!idA || !idB || idA === idB){
-          await showMessage("Can't swap that", 'Pick two different players to trade teams.');
+          await showMessage("Can't swap that", 'Pick two different players to trade.');
           return;
         }
         const teamsInfo = data.teams[scoringSelectedDate];
         if(!teamsInfo) return;
-        let teamA = null, idxA = -1, teamB = null, idxB = -1;
-        teamsInfo.teams.forEach(team => {
-          const ia = team.findIndex(p => p.id === idA);
-          if(ia !== -1){ teamA = team; idxA = ia; }
-          const ib = team.findIndex(p => p.id === idB);
-          if(ib !== -1){ teamB = team; idxB = ib; }
-        });
-        if(!teamA || !teamB){
-          await showMessage("Can't swap that", "Couldn't find one of those players on this date's teams.");
+        const slotA = findTeamsInfoSlot(teamsInfo, idA);
+        const slotB = findTeamsInfoSlot(teamsInfo, idB);
+        if(!slotA || !slotB){
+          await showMessage("Can't swap that", "Couldn't find one of those players on this date's teams or not-in-bet list.");
           return;
         }
-        if(teamA === teamB){
+        if(slotA.kind === 'notInBet' && slotB.kind === 'notInBet'){
+          await showMessage("Can't swap that", "Pick at least one player who's currently on a team — swapping two bench players wouldn't change anything.");
+          return;
+        }
+        if(slotA.kind === 'team' && slotB.kind === 'team' && slotA.list === slotB.list){
           await showMessage('Already on the same team', 'Those two are already grouped together.');
           return;
         }
-        // Swap in place — each player keeps their own courseHandicap/strokesOff,
-        // just changes which team array they sit in.
-        const playerA = teamA[idxA], playerB = teamB[idxB];
-        teamA[idxA] = playerB;
-        teamB[idxB] = playerA;
+        // Swap in place — each player's own courseHandicap/strokesOff travels with
+        // them, whether they're moving team-to-team or off the bench onto a team.
+        // Whichever one lands on the bench needs a "not in the bet" reason to show
+        // there — the one coming FROM the bench already has one; a player coming
+        // straight off a team gets a plain "Swapped out" instead.
+        const playerA = slotA.list[slotA.index], playerB = slotB.list[slotB.index];
+        const outgoingToSlotA = slotA.kind === 'notInBet' ? Object.assign({}, playerB, { reason: playerB.reason || 'Swapped out' }) : playerB;
+        const outgoingToSlotB = slotB.kind === 'notInBet' ? Object.assign({}, playerA, { reason: playerA.reason || 'Swapped out' }) : playerA;
+        slotA.list[slotA.index] = outgoingToSlotA;
+        slotB.list[slotB.index] = outgoingToSlotB;
         await saveData();
         render();
       };
