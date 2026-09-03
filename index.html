@@ -298,6 +298,26 @@
     font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#a3a293; flex-shrink:0; white-space:nowrap;
   }
   .ts-pin-status.set{ color:var(--fairway); font-weight:600; }
+  /* League Roster rows: two fixed-column lines per person, so names/emails/pin status
+     line up the same from row to row instead of wrapping unevenly like a flex row does
+     once button widths and guest badges vary. */
+  .ts-player-row{ padding-bottom:10px; margin-bottom:10px; border-bottom:1px dashed var(--ivory-line); }
+  .ts-player-row:last-of-type{ border-bottom:none; margin-bottom:0; padding-bottom:0; }
+  .ts-player-row-top{ display:grid; grid-template-columns:1fr 1fr 56px; gap:10px; align-items:center; margin-bottom:6px; }
+  .ts-player-row-top input{
+    width:100%; font-family:'Inter'; font-size:13.5px; padding:7px 10px; border-radius:7px; border:1px solid var(--ivory-line);
+  }
+  .ts-player-row-guest-col{ display:flex; justify-content:center; }
+  .ts-player-row-bottom{ display:grid; grid-template-columns:auto 150px 150px; gap:12px; align-items:center; }
+  .ts-player-action-select{
+    font-family:'Inter'; font-size:13px; color:var(--rust); padding:5px 8px; border-radius:7px; border:1px solid var(--ivory-line); background:#fff;
+  }
+  @media (max-width: 640px){
+    .ts-player-row-top{ grid-template-columns:1fr 1fr; }
+    .ts-player-row-guest-col{ grid-column:1 / -1; }
+    .ts-player-row-bottom{ grid-template-columns:1fr 1fr; }
+    .ts-player-row-bottom .ts-admin-toggle-label{ grid-column:1 / -1; }
+  }
   .ts-add-row{ display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
   .ts-add-row input{
     flex:1; min-width:110px; font-family:'Inter'; font-size:13.5px; padding:8px 10px; border-radius:7px; border:1px solid var(--ivory-line);
@@ -483,14 +503,14 @@
     .ts-whoami, .ts-pin-link, .ts-reminders, .ts-tabbar, .ts-footer-note,
     .ts-print-btn, .ts-toggle-wrap, .ts-holes-group, .ts-admin-add, .chip-remove,
     .ts-duty-sort, #ts-duty-filter, #ts-schedule-filter, .ts-swap-btn, .ts-swap-pending,
-    .ts-admin-pill, .ts-add-row, .ts-import-row, #ts-new-name, #ts-add-player, [data-remove] {
+    .ts-admin-pill, .ts-add-row, .ts-import-row, #ts-new-name, #ts-add-player, .ts-player-action-select {
       display:none !important;
     }
     .ts-header{ background:#fff !important; color:var(--ink) !important; padding:10px 0; }
     .ts-eyebrow{ color:var(--ink) !important; }
     .ts-sub{ display:none; }
     .ts-body{ max-width:100%; padding:0; }
-    .ts-card, .ts-duty-row, .ts-roster-row{ break-inside:avoid; box-shadow:none; border:1px solid #ccc; }
+    .ts-card, .ts-duty-row, .ts-roster-row, .ts-player-row{ break-inside:avoid; box-shadow:none; border:1px solid #ccc; }
     .ts-players{ display:block !important; max-height:none !important; }
     select{ appearance:none; -webkit-appearance:none; border:none; background:none; font-weight:600; }
     .ts-duty-controls{ display:none !important; }
@@ -519,6 +539,7 @@
   const BACKEND_KEY = IS_LIVE_ENV ? 'YwlubntDPMdjkcMe' : 'qdQ5OcCYA5gT';
   const ME_KEY = IS_LIVE_ENV ? 'golf-league-me' : 'golf-league-me-TEST';
   const ADMIN_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-admin-unlocked' : 'golf-league-admin-unlocked-TEST';
+  const ADMIN_GATE_KEY = IS_LIVE_ENV ? 'golf-league-admin-gate-players' : 'golf-league-admin-gate-players-TEST';
   const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
   const PLAYERS_PER_TEE_TIME = 4;
   // The club never gives us more than 3 tee times, so pre-confirmation
@@ -529,7 +550,7 @@
   const GOLF_TOMORROW_EXTRA_CC = ['stevekirchhoff52@gmail.com', 'rtleene@aol.com'];
   const BOOKING_WINDOW_DAYS = 14; // club allows booking 2 weeks ahead
   const WEEKS_AHEAD = 52;
-  const VERSION_DATE = 'September 2, 2026'; // update this each time a change is promoted to live
+  const VERSION_DATE = 'September 3, 2026'; // update this each time a change is promoted to live
   const PLAY_DOWS = [1,3,5]; // Mon, Wed, Fri
   const HOLES_CYCLE = ['18','F9','B9'];
   const HOLES_LABEL = { '18': '18 holes', 'F9': 'Front 9', 'B9': 'Back 9' };
@@ -548,9 +569,25 @@
   // instead, since there's no need for that to be shared or synced.
   const storageAvailable = true; // this app always has somewhere to save, once deployed
 
+  // A plain fetch() with no timeout can hang forever if the network stalls or the
+  // backend (an Apps Script web app — sometimes slow to "wake up") never answers —
+  // most noticeable as a Home Screen icon on iOS getting stuck on the loading
+  // screen with no way out short of force-closing it. This aborts and lets the
+  // caller fall back instead of waiting indefinitely.
+  const FETCH_TIMEOUT_MS = 20000;
+  async function fetchWithTimeout(url, options){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try{
+      return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function fetchSharedData(){
     const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}`;
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url);
     const text = await res.text();
     return JSON.parse(text);
   }
@@ -661,9 +698,21 @@
   }
 
   let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holePars: {}, adminPin: null, playerPins: {}, activityLog: [] };
+  // Set when the very first load couldn't reach the backend at all (network hiccup,
+  // or the fetch timing out per FETCH_TIMEOUT_MS above) — distinct from a
+  // successful load that happens to find an empty roster, so init() can show a
+  // "couldn't connect" screen instead of the misleading "Set up your roster" one.
+  let bootError = false;
   let meId = null;
   let lastKnownModified = 0;
   let isAdmin = false;
+  // Super-admin: unlocked only via the single shared master PIN (data.adminPin). Regular
+  // admin access (isAdmin) can also come from a roster-flagged admin entering their own
+  // PIN, but only a super-admin can grant or revoke another player's Admin flag.
+  let isSuperAdmin = false;
+  // Per-device list of flagged-admin player ids who've already unlocked the admin portion
+  // with their own PIN on this device — mirrors verifiedPlayers, but for a separate gate.
+  let adminGatePlayers = [];
   let verifiedPlayers = [];
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
@@ -730,8 +779,13 @@
   async function loadData(){
     try{
       const fetched = await fetchSharedData();
-      if(fetched && typeof fetched === 'object' && !fetched.error){ data = fetched; }
-    }catch(e){ /* no data yet, or network hiccup — fall back to defaults */ }
+      if(fetched && typeof fetched === 'object' && !fetched.error){ data = fetched; bootError = false; }
+    }catch(e){
+      // No data yet, or a network hiccup / timeout — fall back to defaults. If this
+      // is the very first load, init() checks bootError so it can show a "couldn't
+      // connect" screen instead of quietly rendering an empty roster.
+      bootError = true;
+    }
     if(!data.roster) data.roster = [];
     if(!data.signups) data.signups = {};
     if(!data.duty) data.duty = {};
@@ -752,12 +806,25 @@
     lastKnownModified = data._lastModified;
     const removedGhosts = normalizeSignups();
     try{ meId = localStorage.getItem(ME_KEY) || null; }catch(e){ meId = null; }
-    try{ isAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isAdmin = false; }
-    // A player granted admin privilege on their roster record gets it automatically
-    // once identified — no need to know the shared master PIN.
+    try{ isSuperAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isSuperAdmin = false; }
+    isAdmin = isSuperAdmin;
+    try{
+      const gate = localStorage.getItem(ADMIN_GATE_KEY);
+      adminGatePlayers = gate ? JSON.parse(gate) : [];
+    }catch(e){ adminGatePlayers = []; }
+    // A player granted admin privilege on their roster record still has to unlock the
+    // admin portion with their own PIN on each device (see requireAdmin()) — being
+    // flagged Admin no longer grants silent access. This just restores that unlock if
+    // it already happened on this device, and drops it if their Admin flag was revoked
+    // since — so re-granting the flag later correctly asks for the PIN again.
     if(meId){
       const me = data.roster.find(p => p.id === meId);
-      if(me && me.isAdmin) isAdmin = true;
+      if(me && me.isAdmin && adminGatePlayers.includes(meId)){
+        isAdmin = true;
+      }else if(adminGatePlayers.includes(meId) && (!me || !me.isAdmin)){
+        adminGatePlayers = adminGatePlayers.filter(id => id !== meId);
+        try{ localStorage.setItem(ADMIN_GATE_KEY, JSON.stringify(adminGatePlayers)); }catch(e){}
+      }
     }
     try{
       const ver = localStorage.getItem(VERIFIED_KEY);
@@ -816,9 +883,15 @@
     meId = id;
     try{ localStorage.setItem(ME_KEY, id || ''); }catch(e){}
   }
-  async function persistAdmin(flag){
-    isAdmin = flag;
+  async function persistSuperAdmin(flag){
+    isSuperAdmin = flag;
+    if(flag) isAdmin = true;
     try{ localStorage.setItem(ADMIN_UNLOCK_KEY, flag ? 'true' : 'false'); }catch(e){}
+  }
+  async function persistAdminGate(id){
+    isAdmin = true;
+    if(!adminGatePlayers.includes(id)) adminGatePlayers.push(id);
+    try{ localStorage.setItem(ADMIN_GATE_KEY, JSON.stringify(adminGatePlayers)); }catch(e){}
   }
   async function persistVerified(){
     try{ localStorage.setItem(VERIFIED_KEY, JSON.stringify(verifiedPlayers)); }catch(e){}
@@ -1031,10 +1104,29 @@
   }
 
   // --- admin gate: roster management, duty assignment, and importing are locked behind
-  // a single admin PIN (set once by whoever runs the league). Anyone can view; only an
-  // unlocked browser can edit those things.
+  // admin access. A player flagged Admin on their roster record unlocks it with their
+  // own PIN — the same one they sign in with — one device at a time, just like any
+  // other player's PIN. Everyone else (including the league admin's own identity, which
+  // isn't itself flagged) unlocks with the single shared master PIN — which is also the
+  // ONLY way to become a super-admin, the one privilege needed to grant or revoke other
+  // players' Admin flag in League Roster.
   async function requireAdmin(){
     if(isAdmin) return true;
+    const me = meId ? data.roster.find(p => p.id === meId) : null;
+    if(me && me.isAdmin){
+      if(!data.playerPins[meId]){
+        const ok = await forceSetPin(meId);
+        if(!ok) return false;
+      }
+      const entered = await askText('Enter your PIN', 'Enter your PIN to access the admin portion of the app.');
+      if(entered === null) return false;
+      if(entered.trim() === data.playerPins[meId]){
+        await persistAdminGate(meId);
+        return true;
+      }
+      await showMessage('Incorrect PIN', 'That PIN doesn\'t match. Try again.');
+      return false;
+    }
     if(!data.adminPin){
       const setPin = await askText('Set an admin PIN', "You'll use this to edit the roster, booking duty, and imports from any device.");
       if(setPin === null) return false;
@@ -1042,13 +1134,13 @@
       if(!trimmed){ await showMessage('PIN cannot be empty', 'Please enter at least one character.'); return false; }
       data.adminPin = trimmed;
       await saveData();
-      await persistAdmin(true);
+      await persistSuperAdmin(true);
       return true;
     }
     const entered = await askText('Admin PIN', 'Enter the admin PIN to edit this.');
     if(entered === null) return false;
     if(entered.trim() === data.adminPin){
-      await persistAdmin(true);
+      await persistSuperAdmin(true);
       return true;
     }
     await showMessage('Incorrect PIN', 'That PIN doesn\'t match. Try again.');
@@ -1104,7 +1196,7 @@
   async function reverifyIfNeeded(){
     if(!meId || isAdmin) return;
     const me = data.roster.find(p => p.id === meId);
-    if(!me || me.isAdmin) return;
+    if(!me) return;
     if(data.playerPins[meId]) return; // backend has a real PIN on file — already in sync
     verifiedPlayers = verifiedPlayers.filter(vid => vid !== meId);
     await persistVerified();
@@ -1836,14 +1928,17 @@
     // Tee time duties table
     let dutyRows = '';
     thisWeek.forEach(d => {
-      const key = fmtDateKey(d);
       const dateLabel = `${d.getDate()}-${MON_NAMES[d.getMonth()]}`;
+      // Booking duty is about the date two weeks out, not this row's own date — so it
+      // still applies even when this row's date is closed to play. It's the TARGET
+      // date's closure that matters, since that's what decides whether there's
+      // anything to book at all.
+      const target = new Date(d); target.setDate(target.getDate() + BOOKING_WINDOW_DAYS);
+      const targetKey = fmtDateKey(target);
       let dutyText;
-      if(data.closures[key]){
-        dutyText = 'Club Closed';
+      if(data.closures[targetKey]){
+        dutyText = `Course closed ${FULL_MONTHS[target.getMonth()]} ${target.getDate()} — no tee times needed`;
       } else {
-        const target = new Date(d); target.setDate(target.getDate() + BOOKING_WINDOW_DAYS);
-        const targetKey = fmtDateKey(target);
         const targetDuty = dutyForKey(targetKey);
         const targetCount = (data.signups[targetKey] || []).length;
         const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
@@ -2378,8 +2473,15 @@
       const targetDate = new Date(d); targetDate.setDate(targetDate.getDate() + BOOKING_WINDOW_DAYS);
       const targetKey = fmtDateKey(targetDate);
       const targetDuty = dutyForKey(targetKey);
+      // Booking duty is about the date two weeks OUT, not this card's own date — so it
+      // stays relevant even when this card's date is closed to play (see midSection
+      // below, which shows it regardless). It only drops away once the target date
+      // itself is closed, since then there's genuinely nothing to book.
+      const targetClosed = !!data.closures[targetKey];
 
-      const dutyControl = `<span class="ts-duty-static">${targetDuty ? esc(targetDuty.name) + ' has booking duty' : 'No one has booking duty yet'}</span>`;
+      const dutyControl = targetClosed
+        ? `<span class="ts-duty-static">Course closed ${MON_NAMES[targetDate.getMonth()]} ${targetDate.getDate()} — no tee times needed</span>`
+        : `<span class="ts-duty-static">${targetDuty ? esc(targetDuty.name) + ' has booking duty' : 'No one has booking duty yet'}</span>`;
 
       const generatedTeams = data.teams[key];
       const teamsHtml = generatedTeams ? `
@@ -2412,12 +2514,13 @@
         ? `${confirmedCount} confirmed`
         : `${tt} tee time${tt===1?'':'s'}`;
 
-      const midSection = closure
-        ? `<div class="ts-closed-line"><span class="closed-flag">🚫</span><span class="closed-text">Course Closed${closure.trim() ? ' — ' + esc(closure) : ''}</span></div>`
-        : `<div class="ts-card-mid-top">
+      const midSection = `
+           ${closure
+             ? `<div class="ts-closed-line"><span class="closed-flag">🚫</span><span class="closed-text">Course Closed${closure.trim() ? ' — ' + esc(closure) : ''}</span></div>`
+             : `<div class="ts-card-mid-top">
              <span class="ts-count">${countBadge}</span>
              <span class="ts-teetimes ${(!confirmedCount && tt===0)?'zero':''}">${teeTimesBadge}</span>
-           </div>
+           </div>`}
            <div class="ts-duty">
              <span class="golf-flag">⛳</span>
              ${dutyControl}
@@ -2591,15 +2694,22 @@
           <button class="ts-print-btn" id="ts-print-roster">🖨️ Print</button>
         </div>
         ${sortedRoster().map(p => `
-          <div class="ts-roster-row" data-pid="${p.id}">
-            <input type="text" value="${esc(p.name)}" data-name-input="${p.id}" placeholder="Name">
-            <input type="email" value="${esc(p.email || '')}" data-email-input="${p.id}" placeholder="Email (optional)">
-            ${p.isGuest ? `<span class="ts-guest-badge">Guest</span>` : ''}
-            <label class="ts-admin-toggle-label"><input type="checkbox" data-admin-toggle="${p.id}" ${p.isAdmin ? 'checked' : ''}> Admin</label>
-            <span class="ts-pin-status ${data.playerPins[p.id] ? 'set' : ''}">${data.playerPins[p.id] ? '🔒 PIN set' : 'No PIN'}</span>
-            <button data-change-pin="${p.id}">${data.playerPins[p.id] ? 'Change PIN' : 'Set PIN'}</button>
-            ${data.playerPins[p.id] ? `<button data-reset-verification="${p.id}" title="Clears their PIN so they're required to set a new one the next time they open the app on any device">Reset verification</button>` : ''}
-            <button data-remove="${p.id}">Remove</button>
+          <div class="ts-player-row" data-pid="${p.id}">
+            <div class="ts-player-row-top">
+              <input type="text" value="${esc(p.name)}" data-name-input="${p.id}" placeholder="Name">
+              <input type="email" value="${esc(p.email || '')}" data-email-input="${p.id}" placeholder="Email (optional)">
+              <span class="ts-player-row-guest-col">${p.isGuest ? `<span class="ts-guest-badge">Guest</span>` : ''}</span>
+            </div>
+            <div class="ts-player-row-bottom">
+              <label class="ts-admin-toggle-label" title="${isSuperAdmin ? '' : 'Only the master admin PIN can grant or revoke Admin'}"><input type="checkbox" data-admin-toggle="${p.id}" ${p.isAdmin ? 'checked' : ''} ${isSuperAdmin ? '' : 'disabled'}> Admin</label>
+              <span class="ts-pin-status ${data.playerPins[p.id] ? 'set' : ''}">${data.playerPins[p.id] ? '🔒 PIN set' : 'PIN has not been set'}</span>
+              <select class="ts-player-action-select" data-player-action="${p.id}">
+                <option value="">PIN Actions…</option>
+                <option value="pin">${data.playerPins[p.id] ? 'Change PIN' : 'Set PIN'}</option>
+                <option value="reset">Reset verification</option>
+                <option value="remove">Remove</option>
+              </select>
+            </div>
           </div>`).join('') || `
           <p class="ts-empty">No players yet.</p>
           <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
@@ -2611,11 +2721,11 @@
           <input type="email" placeholder="Email (optional)" id="ts-new-email">
           <button id="ts-add-player">Add</button>
         </div>
+        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Checking "Admin" gives that player full admin access automatically once they identify themselves — no PIN needed, and it also skips their own player PIN prompt, since they're already inside the admin gate. The shared admin PIN always still works too, so no one can get permanently locked out. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
         <div class="ts-import-row" style="margin-top:10px;">
           <button id="ts-change-admin-pin">${data.adminPin ? 'Change admin PIN' : 'Set admin PIN'}</button>
           <p>The shared PIN used to unlock admin editing on a device that isn't already an admin by roster flag or the ⚙️ pill.</p>
         </div>
-        <p class="ts-note">Each player can optionally set their own PIN to keep others from toggling their signups. Checking "Admin" gives that player full admin access automatically once they identify themselves — no PIN needed, and it also skips their own player PIN prompt, since they're already inside the admin gate. The shared admin PIN always still works too, so no one can get permanently locked out. Booking duty is set from the "Booking duty" tab; course closures under Admin → Course Closures.</p>
       </div>
     `;
   }
@@ -3155,12 +3265,12 @@
       let confirmControl = '';
       if(canConfirm){
         confirmControl = `<div class="ts-duty-row-sub ts-confirm-row">
-            <label>Confirmed:</label>
+            <label>To be confirmed on ${MON_NAMES[r.bookDate.getMonth()]} ${r.bookDate.getDate()}:</label>
             <select data-confirm-key="${r.playKey}" style="width:52px; font-family:'Inter'; font-size:13px; padding:5px 4px; border-radius:6px; border:1px solid var(--ivory-line);">
               <option value="" ${!confirmed?'selected':''}>–</option>
               ${[1,2,3].map(n => `<option value="${n}" ${confirmed===n?'selected':''}>${n}</option>`).join('')}
             </select>
-            <span>tee time${confirmed===1?'':'s'} booked ${dayRef} for ${playLabel}</span>
+            <span>tee time${confirmed===1?'':'s'} booked for ${playLabel}</span>
           </div>`;
       } else if(typeof confirmed === 'number' && confirmed > 0){
         confirmControl = `<div class="ts-duty-row-sub">✅ ${confirmed} tee time${confirmed===1?'':'s'} booked ${dayRef} for ${playLabel}</div>`;
@@ -3331,22 +3441,6 @@
         await compareWithPasted();
       };
     }
-    document.querySelectorAll('[data-remove]').forEach(btn => {
-      btn.onclick = async () => {
-        if(!isAdmin) return;
-        const pid = btn.getAttribute('data-remove');
-        data.roster = data.roster.filter(p => p.id !== pid);
-        Object.keys(data.signups).forEach(k => {
-          data.signups[k] = (data.signups[k]||[]).filter(e => e.id !== pid);
-        });
-        Object.keys(data.duty).forEach(k => {
-          if(data.duty[k] === pid) delete data.duty[k];
-        });
-        delete data.playerPins[pid];
-        await saveData();
-        render();
-      };
-    });
     document.querySelectorAll('[data-name-input]').forEach(inp => {
       inp.onchange = async () => {
         if(!isAdmin) return;
@@ -3631,7 +3725,7 @@
 
     document.querySelectorAll('[data-admin-toggle]').forEach(chk => {
       chk.addEventListener('change', async () => {
-        if(!isAdmin) return;
+        if(!isSuperAdmin) return;
         const pid = chk.getAttribute('data-admin-toggle');
         const player = data.roster.find(p => p.id === pid);
         if(!player) return;
@@ -3641,38 +3735,52 @@
       });
     });
 
-    document.querySelectorAll('[data-change-pin]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if(!isAdmin) return;
-        const pid = btn.getAttribute('data-change-pin');
+    // League Roster's per-player Actions dropdown — Set/Change PIN, Reset
+    // verification, and Remove, all in one control instead of three separate buttons.
+    // Always snaps back to the "PIN Actions…" placeholder, whether or not the action
+    // actually went through, so it never looks like a saved choice sitting there.
+    document.querySelectorAll('[data-player-action]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const pid = sel.getAttribute('data-player-action');
+        const action = sel.value;
+        sel.value = '';
+        if(!isAdmin || !action) return;
         const player = data.roster.find(p => p.id === pid);
         if(!player) return;
-        const newPin = await askText(`${data.playerPins[pid] ? 'Change' : 'Set'} PIN for ${player.name}`, 'Enter a 4-digit PIN for this player.');
-        if(newPin === null) return;
-        const trimmed = newPin.trim();
-        if(!/^\d{4}$/.test(trimmed)){ await showMessage('Needs to be 4 digits', 'Enter exactly 4 numbers, like 1234.'); return; }
-        data.playerPins[pid] = trimmed;
-        await saveData();
-        render();
-      });
-    });
 
-    // Clears a player's PIN so League Roster correctly shows "No PIN" again, and so
-    // reverifyIfNeeded() forces them through forceSetPin the next time their app loads
-    // on any device — even a device that already trusted them locally, since that
-    // trust is now checked against the backend PIN actually existing.
-    document.querySelectorAll('[data-reset-verification]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if(!isAdmin) return;
-        const pid = btn.getAttribute('data-reset-verification');
-        const player = data.roster.find(p => p.id === pid);
-        if(!player) return;
-        const confirmed = await askConfirm('Reset verification?', `${player.name} will be required to set a new PIN the next time they open the app on any device. Continue?`, 'Reset verification', 'Cancel');
-        if(!confirmed) return;
-        delete data.playerPins[pid];
-        await saveData();
-        await showMessage('Verification reset', `${player.name} will be asked to set a new PIN next time they open the app.`);
-        render();
+        if(action === 'pin'){
+          const newPin = await askText(`${data.playerPins[pid] ? 'Change' : 'Set'} PIN for ${player.name}`, 'Enter a 4-digit PIN for this player.');
+          if(newPin === null) return;
+          const trimmed = newPin.trim();
+          if(!/^\d{4}$/.test(trimmed)){ await showMessage('Needs to be 4 digits', 'Enter exactly 4 numbers, like 1234.'); return; }
+          data.playerPins[pid] = trimmed;
+          await saveData();
+          render();
+        } else if(action === 'reset'){
+          // Clears the player's PIN so League Roster correctly shows "PIN has not been set" again, and
+          // so reverifyIfNeeded() forces them through forceSetPin the next time their app
+          // loads on any device — even one that already trusted them locally, since that
+          // trust is now checked against the backend PIN actually existing.
+          const confirmed = await askConfirm('Reset verification?', `${player.name} will be required to set a new PIN the next time they open the app on any device. Continue?`, 'Reset verification', 'Cancel');
+          if(!confirmed) return;
+          delete data.playerPins[pid];
+          await saveData();
+          await showMessage('Verification reset', `${player.name} will be asked to set a new PIN next time they open the app.`);
+          render();
+        } else if(action === 'remove'){
+          const confirmed = await askConfirm('Remove player?', `Removes ${player.name} from the roster, along with their signups and PIN. This can't be undone. Continue?`, 'Remove', 'Cancel');
+          if(!confirmed) return;
+          data.roster = data.roster.filter(p => p.id !== pid);
+          Object.keys(data.signups).forEach(k => {
+            data.signups[k] = (data.signups[k]||[]).filter(e => e.id !== pid);
+          });
+          Object.keys(data.duty).forEach(k => {
+            if(data.duty[k] === pid) delete data.duty[k];
+          });
+          delete data.playerPins[pid];
+          await saveData();
+          render();
+        }
       });
     });
 
@@ -3717,7 +3825,18 @@
     const adminPill = document.getElementById('ts-admin-pill');
     if(adminPill){
       adminPill.onclick = async () => {
-        if(isAdmin){ await persistAdmin(false); render(); return; }
+        if(isAdmin){
+          // Locking really locks: drop super-admin if that's how this device got in, and
+          // drop this identity's admin-portion gate too, so it's asked for again next time.
+          if(isSuperAdmin) await persistSuperAdmin(false);
+          isAdmin = false;
+          if(meId && adminGatePlayers.includes(meId)){
+            adminGatePlayers = adminGatePlayers.filter(id => id !== meId);
+            try{ localStorage.setItem(ADMIN_GATE_KEY, JSON.stringify(adminGatePlayers)); }catch(e){}
+          }
+          render();
+          return;
+        }
         const ok = await requireAdmin();
         render();
       };
@@ -4002,6 +4121,21 @@
 
   (async function init(){
     await loadData();
+    if(bootError){
+      // Couldn't reach the backend at all on this, the very first load — show a
+      // clear retry screen instead of either hanging on "setting the tee sheet…"
+      // forever, or (worse) silently rendering the empty-roster "Set up your
+      // roster" screen, which would look like the whole roster had vanished.
+      root.innerHTML = `
+        ${testBannerHtml()}
+        <div class="ts-loading">
+          Couldn't load the tee sheet — check your connection.
+          <br><button id="ts-retry-load" style="margin-top:14px; font-family:'Inter'; font-size:13.5px; padding:8px 16px; border-radius:7px; border:1px solid var(--ivory-line); background:#fff; color:var(--rust); cursor:pointer;">Try again</button>
+        </div>`;
+      const retryBtn = document.getElementById('ts-retry-load');
+      if(retryBtn) retryBtn.onclick = () => window.location.reload();
+      return;
+    }
     render();
     await reverifyIfNeeded();
     await autoIdentifyIfNeeded();
