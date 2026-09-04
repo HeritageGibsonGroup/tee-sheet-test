@@ -776,26 +776,36 @@
     return removedGhosts;
   }
 
-  // Self-heal: any already-saved team member whose courseHandicap/strokesOff were
-  // never computed at all — e.g. an old "Not in the bet" entry swapped onto a team
-  // before that swap-in logic filled those fields in — gets them recomputed here,
-  // the same way a fresh team generation would. Only touches entries missing the
-  // fields outright (an explicit null, once already computed, is left alone — that
-  // means "known to have no handicap," not "never checked"), so this doesn't keep
-  // re-triggering a save for players who genuinely don't have one on file. Returns
-  // how many players were healed, so callers can surface or act on that.
+  // Self-heal: any already-saved team member OR "Not in the bet" entry whose
+  // courseHandicap/strokesOff were never computed at all — e.g. an old bench entry
+  // from before those fields were tracked there, whether it later got swapped onto
+  // a team or is still sitting out — gets them recomputed here, the same way a
+  // fresh team generation would. Only touches entries missing the fields outright
+  // (an explicit null, once already computed, is left alone — that means "known to
+  // have no handicap," not "never checked"), so this doesn't keep re-triggering a
+  // save for players who genuinely don't have one on file. Returns how many
+  // players were healed, so callers can surface or act on that.
   function normalizeTeams(){
     let healed = 0;
     Object.keys(data.teams).forEach(dateKey => {
       const info = data.teams[dateKey];
-      if(!info || !Array.isArray(info.teams)) return;
-      info.teams.forEach(team => {
-        team.forEach((p, idx) => {
+      if(!info) return;
+      if(Array.isArray(info.teams)){
+        info.teams.forEach(team => {
+          team.forEach((p, idx) => {
+            if(!p || ('courseHandicap' in p && 'strokesOff' in p)) return;
+            team[idx] = recomputedForTeamSlot(dateKey, p);
+            healed++;
+          });
+        });
+      }
+      if(Array.isArray(info.notInBet)){
+        info.notInBet.forEach((p, idx) => {
           if(!p || ('courseHandicap' in p && 'strokesOff' in p)) return;
-          team[idx] = recomputedForTeamSlot(dateKey, p);
+          info.notInBet[idx] = Object.assign(recomputedForTeamSlot(dateKey, p), { reason: p.reason });
           healed++;
         });
-      });
+      }
     });
     return healed;
   }
@@ -2429,6 +2439,9 @@
           <button class="ts-tab ${activeSection==='duty'?'active':''}" data-tab="duty">
             <span class="ts-tab-icon">⛳</span><span class="ts-tab-label">Booking duty</span>
           </button>
+          <button class="ts-tab ${activeSection==='handicaps'?'active':''}" data-tab="handicaps">
+            <span class="ts-tab-icon">📊</span><span class="ts-tab-label">Handicaps</span>
+          </button>
         </div>
 
         ${activeSection === 'admin' ? `
@@ -2443,6 +2456,7 @@
           <div id="ts-admin-content"></div>
         ` : ''}
         ${activeSection === 'duty' ? `<div id="ts-duty-panel"></div>` : ''}
+        ${activeSection === 'handicaps' ? `<div id="ts-handicaps-public-panel"></div>` : ''}
         ${activeSection === 'schedule' ? `
           <div class="ts-section-title-row">
             <h2 class="ts-section-title">Upcoming dates <span>next ${WEEKS_AHEAD} weeks</span></h2>
@@ -2492,6 +2506,10 @@
 
     if(activeSection === 'duty'){
       renderDutyPanel(document.getElementById('ts-duty-panel'), schedule);
+    }
+
+    if(activeSection === 'handicaps'){
+      renderPublicHandicapsPanel(document.getElementById('ts-handicaps-public-panel'));
     }
 
     if(activeSection === 'admin'){
@@ -2588,7 +2606,10 @@
           ${generatedTeams.notInBet && generatedTeams.notInBet.length ? `
             <div class="ts-team-row">
               <span class="ts-team-num" style="color:var(--rust);">Not in the bet</span>
-              ${generatedTeams.notInBet.map(p => `<span class="name-chip">${esc(p.name)} <span class="ts-team-so">(${esc(p.reason)})</span></span>`).join('')}
+              ${generatedTeams.notInBet.map(p => {
+                const hcNote = typeof p.courseHandicap === 'number' ? ` — HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''}` : '';
+                return `<span class="name-chip">${esc(p.name)} <span class="ts-team-so">(${esc(p.reason)}${hcNote})</span></span>`;
+              }).join('')}
             </div>` : ''}
         </div>` : '';
 
@@ -2967,30 +2988,29 @@
       }
     }
 
-    // Course handicap for whoever has the lowest number plays to scratch (0 strokes) —
-    // everyone else's "Strokes Off" is their own course handicap minus that lowest one.
-    const withCourseHcp = data.roster
-      .filter(p => p.defaultTee && p.courseHandicaps && typeof p.courseHandicaps[p.defaultTee] === 'number')
-      .map(p => ({ id: p.id, ch: p.courseHandicaps[p.defaultTee] }));
-    const lowestCH = withCourseHcp.length ? Math.min(...withCourseHcp.map(x => x.ch)) : null;
+    // Strokes Off (a player's course handicap relative to whoever in the whole roster
+    // has the lowest one, who plays to scratch) isn't shown in this table anymore, but
+    // the underlying math still lives in courseHandicapFor/lowestCourseHandicapForDate
+    // and stays exactly as-is for team building elsewhere in the app.
+    const tableHeaderHtml = `
+      <div class="ts-roster-row" style="border-bottom:2px solid var(--ivory-line); padding-bottom:8px; margin-bottom:4px;">
+        <span style="flex:1; min-width:170px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Player</span>
+        <span style="width:60px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Handicap Index</span>
+        <span style="width:140px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Tees</span>
+        <span style="width:110px; text-align:right; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Course handicap</span>
+      </div>`;
 
     const playerRows = sortedRoster().map(p => {
-      const courseHcp = (p.defaultTee && p.courseHandicaps && typeof p.courseHandicaps[p.defaultTee] === 'number')
-        ? p.courseHandicaps[p.defaultTee]
-        : null;
-      const strokesOff = (courseHcp !== null && lowestCH !== null) ? (courseHcp - lowestCH) : null;
+      const courseHcp = computedCourseHandicap(p.handicapIndex, p.defaultTee);
       return `
         <div class="ts-roster-row" data-hpid="${p.id}">
-          <span style="flex:1;">${esc(p.name)}</span>
-          <label style="display:flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap;">HI
-            <input type="number" step="0.1" min="-10" max="54" data-handicap-index="${p.id}" value="${typeof p.handicapIndex === 'number' ? p.handicapIndex : ''}" placeholder="—" style="width:60px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
-          </label>
-          <select data-default-tee="${p.id}" style="flex:1; font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
+          <span style="flex:1; min-width:170px;">${esc(p.name)}</span>
+          <input type="number" step="0.1" min="-10" max="54" data-handicap-index="${p.id}" value="${typeof p.handicapIndex === 'number' ? p.handicapIndex : ''}" placeholder="—" style="width:60px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
+          <select data-default-tee="${p.id}" style="width:140px; font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
             <option value="">No default tee</option>
             ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${p.defaultTee===tee?'selected':''}>${esc(tee)}</option>`).join('')}
           </select>
-          <span style="width:90px; font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right;">${courseHcp !== null ? 'Strokes: ' + courseHcp : ''}</span>
-          <span style="width:100px; font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right;">${strokesOff !== null ? 'S.O.: ' + strokesOff : ''}</span>
+          <span style="width:110px; font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right;">${courseHcp !== null ? courseHcp : '—'}</span>
         </div>`;
     }).join('');
 
@@ -3017,12 +3037,29 @@
           ${parStatusHtml}
         </div>
         <div class="ts-import-row">
+          <span class="ts-import-row-label">Handicap calculator</span>
+          <p style="margin:0 0 10px;">Calculate the Heritage course handicap for any index by tee box.</p>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">Input handicap index
+              <input type="number" step="0.1" min="-10" max="54" id="ts-hcp-calc-index" placeholder="—" style="width:70px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
+            </label>
+            <select id="ts-hcp-calc-tee" style="font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
+              <option value="">Select tee</option>
+              ${data.teeOptions.map(tee => `<option value="${esc(tee)}">${esc(tee)}</option>`).join('')}
+            </select>
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:600;">Course handicap: <span id="ts-hcp-calc-result">—</span></span>
+          </div>
+        </div>
+        <div class="ts-import-row">
           <span class="ts-import-row-label">Player handicaps</span>
-          <p style="margin:0 0 10px;">Handicap Index (HI) updates about twice a month — paste a fresh update via Import data snapshot on the Data tab, or edit an index by hand right here. Editing HI recalculates that player's Course Handicap at every tee automatically (using Rating, Slope, and the Par above). Set each player's default tee here too. "Strokes" is their course handicap at that tee; "S.O." is how many strokes they get relative to whoever in the whole roster has the lowest course handicap (who plays to scratch).</p>
+          <p style="margin:0 0 10px;">Handicap Index (HI) updates about twice a month — paste a fresh update via Import data snapshot on the Data tab, or edit an index by hand right here. Editing HI recalculates that player's Course Handicap at every tee automatically (using Rating, Slope, and the Par above). Changing someone's Tees here asks first, since it resets their default tee.</p>
           <label style="display:flex; align-items:center; gap:8px; font-size:13px; margin:0 0 12px;">Handicaps effective as of
             <input type="date" data-handicap-effective-date value="${data.handicapEffectiveDate || ''}" style="font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
           </label>
-          ${playerRows || '<p class="ts-empty">No players yet.</p>'}
+          <div style="overflow-x:auto;">
+            ${tableHeaderHtml}
+            ${playerRows || '<p class="ts-empty">No players yet.</p>'}
+          </div>
         </div>
         <div class="ts-import-row">
           <button id="ts-generate-teams-btn">Generate teams now</button>
@@ -3030,6 +3067,85 @@
         </div>
       </div>
     `;
+  }
+
+  // Public Handicaps tab — a read-only preview of what Admin > Handicaps > Player
+  // handicaps shows, open to everyone (no PIN needed), plus the same live what-if
+  // calculator. Editing Handicap Index and default tees still only happens in Admin;
+  // a player's own default tee can still be changed from "My default tee" up top.
+  function renderPublicHandicapsPanel(el){
+    const STALE_DAYS = 15;
+    let staleBannerHtml = '';
+    let effectiveDateMs = null;
+    if(data.handicapEffectiveDate){
+      const parsed = new Date(data.handicapEffectiveDate + 'T00:00:00');
+      if(!isNaN(parsed.getTime())) effectiveDateMs = parsed.getTime();
+    }
+    const staleReferenceMs = effectiveDateMs !== null ? effectiveDateMs : data.handicapUpdatedAt;
+    if(!staleReferenceMs){
+      staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>No handicap update on record yet.</b></div>`;
+    } else {
+      const daysSince = Math.floor((Date.now() - staleReferenceMs) / (1000*60*60*24));
+      if(daysSince > STALE_DAYS){
+        staleBannerHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-bottom:12px;"><b>Handicaps haven't been updated in ${daysSince} days.</b></div>`;
+      }
+    }
+
+    let effectiveDateLabel = 'not set yet';
+    if(data.handicapEffectiveDate){
+      const d = new Date(data.handicapEffectiveDate + 'T00:00:00');
+      if(!isNaN(d.getTime())) effectiveDateLabel = `${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+    }
+
+    const tableHeaderHtml = `
+      <div class="ts-roster-row" style="border-bottom:2px solid var(--ivory-line); padding-bottom:8px; margin-bottom:4px;">
+        <span style="flex:1; min-width:170px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Player</span>
+        <span style="width:90px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Handicap Index</span>
+        <span style="width:140px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Tees</span>
+        <span style="width:110px; text-align:right; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Course handicap</span>
+      </div>`;
+
+    const playerRows = sortedRoster().map(p => {
+      const courseHcp = computedCourseHandicap(p.handicapIndex, p.defaultTee);
+      return `
+        <div class="ts-roster-row">
+          <span style="flex:1; min-width:170px;">${esc(p.name)}</span>
+          <span style="width:90px; font-family:'IBM Plex Mono',monospace; font-size:12px;">${typeof p.handicapIndex === 'number' ? p.handicapIndex : '—'}</span>
+          <span style="width:140px; font-size:13px;">${p.defaultTee ? esc(p.defaultTee) : '—'}</span>
+          <span style="width:110px; font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right;">${courseHcp !== null ? courseHcp : '—'}</span>
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="ts-section-title-row">
+        <h2 class="ts-section-title">Handicaps</h2>
+      </div>
+      <div class="ts-roster-panel">
+        ${staleBannerHtml}
+        <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+          <span class="ts-import-row-label">Handicap calculator</span>
+          <p style="margin:0 0 10px;">Calculate the Heritage course handicap for any index by tee box.</p>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">Input handicap index
+              <input type="number" step="0.1" min="-10" max="54" id="ts-hcp-calc-index-pub" placeholder="—" style="width:70px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--ivory-line);">
+            </label>
+            <select id="ts-hcp-calc-tee-pub" style="font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:6px; border:1px solid var(--ivory-line);">
+              <option value="">Select tee</option>
+              ${data.teeOptions.map(tee => `<option value="${esc(tee)}">${esc(tee)}</option>`).join('')}
+            </select>
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:600;">Course handicap: <span id="ts-hcp-calc-result-pub">—</span></span>
+          </div>
+        </div>
+        <div class="ts-import-row">
+          <span class="ts-import-row-label">Player handicaps</span>
+          <p style="margin:0 0 4px;">Handicaps effective as of ${esc(effectiveDateLabel)}.</p>
+          <p style="margin:0 0 10px;">You can update your default tee in the dropdown at the top of this page under your name.</p>
+          <div style="overflow-x:auto;">
+            ${tableHeaderHtml}
+            ${playerRows || '<p class="ts-empty">No players yet.</p>'}
+          </div>
+        </div>
+      </div>`;
   }
 
   // Scoring & Bets: hole-by-hole score entry for a date's generated teams,
@@ -3777,11 +3893,40 @@
         const pid = sel.getAttribute('data-default-tee');
         const player = data.roster.find(p => p.id === pid);
         if(!player) return;
-        if(sel.value){ player.defaultTee = sel.value; } else { delete player.defaultTee; }
+        const prevTee = player.defaultTee || '';
+        const newTee = sel.value;
+        if(newTee === prevTee) return;
+        const firstName = player.name.split(' ')[0];
+        const promptMsg = newTee
+          ? `Reset ${firstName}'s default tee to ${newTee}?`
+          : `Clear ${firstName}'s default tee?`;
+        const ok = await askConfirm('Reset default tee?', promptMsg, 'Yes, update', 'No, leave as is');
+        if(!ok){ sel.value = prevTee; return; }
+        if(newTee){ player.defaultTee = newTee; } else { delete player.defaultTee; }
         await saveData();
         render();
       });
     });
+
+    const wireHcpCalculator = (indexId, teeId, resultId) => {
+      const idxEl = document.getElementById(indexId);
+      const teeEl = document.getElementById(teeId);
+      const resultEl = document.getElementById(resultId);
+      if(!idxEl || !teeEl || !resultEl) return;
+      const updateHcpCalc = () => {
+        const raw = idxEl.value.trim();
+        const tee = teeEl.value;
+        if(raw === '' || !tee){ resultEl.textContent = '—'; return; }
+        const val = parseFloat(raw);
+        if(isNaN(val)){ resultEl.textContent = '—'; return; }
+        const ch = computedCourseHandicap(val, tee);
+        resultEl.textContent = ch !== null ? ch : '—';
+      };
+      idxEl.addEventListener('input', updateHcpCalc);
+      teeEl.addEventListener('change', updateHcpCalc);
+    };
+    wireHcpCalculator('ts-hcp-calc-index', 'ts-hcp-calc-tee', 'ts-hcp-calc-result');
+    wireHcpCalculator('ts-hcp-calc-index-pub', 'ts-hcp-calc-tee-pub', 'ts-hcp-calc-result-pub');
 
     document.querySelectorAll('[data-handicap-index]').forEach(inp => {
       inp.addEventListener('change', async () => {
