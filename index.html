@@ -216,6 +216,16 @@
     width:30px; font-family:'IBM Plex Mono',monospace; font-size:12.5px; text-align:center;
     padding:4px 2px; border-radius:5px; border:1px solid var(--ivory-line);
   }
+  .ts-score-input-lg{
+    width:64px; font-size:22px; padding:10px 4px; border-radius:9px; border-width:1.5px;
+    flex-shrink:0;
+  }
+  input.ts-score-input-lg.ts-score-stroke{ border-color:var(--brass); background:#FBF3E4; }
+  .ts-score-step{
+    width:38px; height:38px; flex-shrink:0; font-size:19px; line-height:1; font-weight:600;
+    border-radius:9px; border:1px solid var(--ivory-line); background:#fff; color:var(--ink);
+  }
+  .ts-score-step:active{ background:var(--ivory-line); }
   .ts-score-table td.ts-score-stroke{ background:#FBF3E4; }
   .ts-score-table td.ts-score-stroke .ts-score-input{ border-color:var(--brass); }
   .ts-hh-row{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
@@ -541,6 +551,7 @@
   const ADMIN_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-admin-unlocked' : 'golf-league-admin-unlocked-TEST';
   const ADMIN_GATE_KEY = IS_LIVE_ENV ? 'golf-league-admin-gate-players' : 'golf-league-admin-gate-players-TEST';
   const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
+  const GUEST_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-guest-unlocked' : 'golf-league-guest-unlocked-TEST';
   const PLAYERS_PER_TEE_TIME = 4;
   // The club never gives us more than 3 tee times, so pre-confirmation
   // estimates should never assume a 4th one is possible.
@@ -697,7 +708,7 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holePars: {}, adminPin: null, playerPins: {}, activityLog: [] };
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holePars: {}, adminPin: null, guestPin: '3672', playerPins: {}, activityLog: [] };
   // Set when the very first load couldn't reach the backend at all (network hiccup,
   // or the fetch timing out per FETCH_TIMEOUT_MS above) — distinct from a
   // successful load that happens to find an empty roster, so init() can show a
@@ -714,11 +725,17 @@
   // with their own PIN on this device — mirrors verifiedPlayers, but for a separate gate.
   let adminGatePlayers = [];
   let verifiedPlayers = [];
+  // Whether this device has already entered the shared guest PIN — separate from any
+  // roster identity. Only matters for someone who never picks a name (a true visitor);
+  // a recognized player or an admin never needs it.
+  let isGuestVerified = false;
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'admin'
   let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps' | 'scoring'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
+  let scoringTeamIndex = 0; // which team's card is showing in the hole-by-hole view
+  let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
   let dutySort = 'date'; // 'date' | 'person'
   let dutyFilterId = ''; // '' = everyone, '__me__' = current identity, or a player id
   let scheduleFilterId = ''; // same idea, for the Upcoming Dates list
@@ -835,12 +852,14 @@
     if(!data.holePars) data.holePars = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
+    if(!data.guestPin) data.guestPin = '3672';
     if(!data.activityLog) data.activityLog = [];
     if(typeof data._lastModified !== 'number') data._lastModified = 0;
     lastKnownModified = data._lastModified;
     const removedGhosts = normalizeSignups();
     const healedTeams = normalizeTeams();
     try{ meId = localStorage.getItem(ME_KEY) || null; }catch(e){ meId = null; }
+    try{ isGuestVerified = localStorage.getItem(GUEST_UNLOCK_KEY) === 'true'; }catch(e){ isGuestVerified = false; }
     try{ isSuperAdmin = localStorage.getItem(ADMIN_UNLOCK_KEY) === 'true'; }catch(e){ isSuperAdmin = false; }
     isAdmin = isSuperAdmin;
     try{
@@ -1239,15 +1258,44 @@
     await forceSetPin(meId, "Your PIN needs to be set again — either it was reset, or this device's saved sign-in didn't match what's on file. Choose a new 4-digit PIN.");
   }
 
+  // --- guest gate: anyone who isn't picking their own name off the roster has to enter
+  // the shared guest PIN (set in League Roster) before they can browse — once per device,
+  // same idea as verifiedPlayers/adminGatePlayers. Meant for guests Tom brings along, not
+  // strangers who happen across the link.
+  async function requireGuestPin(){
+    if(isGuestVerified) return true;
+    const entered = await askText('Guest PIN', "Enter the guest PIN to continue — ask an admin if you don't have it.");
+    if(entered === null) return false;
+    if(entered.trim() === (data.guestPin || '')){
+      isGuestVerified = true;
+      try{ localStorage.setItem(GUEST_UNLOCK_KEY, 'true'); }catch(e){}
+      return true;
+    }
+    await showMessage('Incorrect PIN', 'That PIN doesn\'t match. Try again.');
+    return false;
+  }
+
   // Runs once on load (and whenever no one's identified yet): proactively asks who's
-  // using the app, instead of waiting for someone to notice the "I'm —" dropdown.
+  // using the app, instead of waiting for someone to notice the "I'm —" dropdown. Keeps
+  // re-asking until someone either signs in as a roster player, enters the guest PIN, or
+  // enters the admin PIN — dismissing the prompt doesn't quietly let anyone browse.
   async function autoIdentifyIfNeeded(){
-    if(meId || data.roster.length === 0) return;
-    const options = sortedRoster().map(p => ({ value: p.id, label: p.name }));
-    const chosenId = await askChoice('Who are you?', 'Select your name to sign up for dates and see your booking duty — or continue as a visitor to just browse.', options, 'Continue', 'Continue as a visitor');
-    if(!chosenId) return;
-    const ok = await verifyPlayerSelection(chosenId);
-    if(ok){ await persistMe(chosenId); }
+    if(meId || isAdmin || isGuestVerified || data.roster.length === 0) return;
+    while(true){
+      const options = sortedRoster().map(p => ({ value: p.id, label: p.name }));
+      const chosenId = await askChoice('Who are you?', 'Select your name to sign up for dates and see your booking duty — or continue if you\'re a guest.', options, 'Continue', "I'm a guest");
+      if(chosenId){
+        const ok = await verifyPlayerSelection(chosenId);
+        if(ok){ await persistMe(chosenId); return; }
+        continue;
+      }
+      const isGuest = await askConfirm("Not on the roster?", "Enter the guest PIN to continue as a visitor — or, if you're the league admin, enter the admin PIN instead.", 'Guest PIN', 'Admin PIN');
+      if(isGuest){
+        if(await requireGuestPin()) return;
+      } else {
+        if(await requireAdmin()) return;
+      }
+    }
   }
 
   // Paste-based import: since each app's storage is sandboxed to itself, the live app can't
@@ -2840,6 +2888,14 @@
           <button id="ts-change-admin-pin">${data.adminPin ? 'Change admin PIN' : 'Set admin PIN'}</button>
           <p>The shared PIN used to unlock admin editing on a device that isn't already an admin by roster flag or the ⚙️ pill.</p>
         </div>
+        <div class="ts-import-row">
+          <span class="ts-import-row-label">Guest PIN</span>
+          <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:18px; font-weight:600; letter-spacing:.08em;">${esc(data.guestPin || '—')}</span>
+            <button id="ts-change-guest-pin">Change guest PIN</button>
+          </div>
+          <p>Give this to guests you bring along — anyone who isn't picking their own name off the roster needs it once per device before they can browse.</p>
+        </div>
       </div>
     `;
   }
@@ -3250,6 +3306,84 @@
         </div>`;
     }).join('');
 
+    // Hole-by-hole view: pick your own team, see just your playing partners, one
+    // hole at a time — meant for a group entering their own scores together after
+    // each hole, without seeing (or needing to see) the other team's card. Same
+    // data-score-* attributes as the scorecard grid, so scores entered here save
+    // through the exact same saveScore() wiring — just a different, narrower layout
+    // over the same data. The bet's live status further down still reflects every
+    // team's scores as they come in, regardless of who's looking.
+    if(scoringTeamIndex >= teamsInfo.teams.length) scoringTeamIndex = 0;
+    if(scoringHoleIndex >= flatHoles.length) scoringHoleIndex = flatHoles.length - 1;
+    if(scoringHoleIndex < 0) scoringHoleIndex = 0;
+    const hbhTeam = teamsInfo.teams[scoringTeamIndex] || [];
+    const hbhHole = flatHoles[scoringHoleIndex];
+    const hbhSeriesIndex = groups.findIndex(g => g.includes(hbhHole));
+    const hbhPar = typeof data.holePars[String(hbhHole)] === 'number' ? data.holePars[String(hbhHole)] : null;
+
+    const teamPickerHtml = teamsInfo.teams.length > 1 ? `
+      <div style="margin-top:6px;">
+        <select id="ts-hbh-team-select" style="font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+          ${teamsInfo.teams.map((team, ti) => `<option value="${ti}" ${ti===scoringTeamIndex?'selected':''}>Team ${ti+1} — ${team.map(p => p.name.split(' ')[0]).join(', ')}</option>`).join('')}
+        </select>
+      </div>` : '';
+
+    // Default an unset score to par for this hole, so a group that made par can
+    // just confirm and move on instead of typing every number — toggle it up or
+    // down with the +/- buttons, or leave it alone to accept par. The default is
+    // saved silently the moment this hole/team is viewed (harmless to re-save if
+    // it's already on file, and it stops as soon as a real score is on record).
+    if(hbhPar !== null){
+      hbhTeam.forEach(p => {
+        const existing = (round.scores[p.id] || {})[String(hbhHole)];
+        if(typeof existing !== 'number') saveScore(dateKey, p.id, hbhHole, hbhPar).catch(()=>{});
+      });
+    }
+
+    const hbhRowsHtml = hbhTeam.map(p => {
+      const playerScores = round.scores[p.id] || {};
+      const v = playerScores[String(hbhHole)];
+      const displayVal = typeof v === 'number' ? v : (hbhPar !== null ? hbhPar : '');
+      const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, hbhHole) : 0;
+      const inputId = `ts-hbh-score-${p.id}`;
+      return `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--ivory-line);">
+          <div>
+            <div style="font-weight:600; font-size:15px;">${esc(p.name)}</div>
+            <div style="font-size:11.5px; color:#8b8a7c;">${p.strokesOff ? `S.O. ${p.strokesOff}` : ''}${strokesHere > 0 ? ' · gets a stroke here' : ''}</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="-1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">−</button>
+            <input type="number" inputmode="numeric" min="1" max="15" step="1" id="${inputId}" class="ts-score-input ts-score-input-lg${strokesHere > 0 ? ' ts-score-stroke' : ''}"
+              data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}"
+              value="${displayVal}">
+            <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">+</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    const holeJumpOptionsHtml = flatHoles.map((h, idx) => {
+      const p = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
+      return `<option value="${idx}" ${idx===scoringHoleIndex?'selected':''}>Hole ${h}${p !== null ? ` (par ${p})` : ''}</option>`;
+    }).join('');
+
+    const holeByHoleHtml = `
+      <div class="ts-import-row" style="margin-top:16px;">
+        <span class="ts-import-row-label">Your team</span>
+        ${teamPickerHtml || `<p style="margin:6px 0 0;">Team 1 — ${hbhTeam.map(p => p.name.split(' ')[0]).join(', ')}</p>`}
+      </div>
+      <div class="ts-teams-block" style="margin-top:16px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button id="ts-hbh-prev-hole" ${scoringHoleIndex===0?'disabled':''} style="padding:8px 12px; flex-shrink:0;">‹</button>
+          <select id="ts-hbh-hole-select" style="flex:1; font-family:'Inter'; font-size:13px; padding:8px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+            ${holeJumpOptionsHtml}
+          </select>
+          <button id="ts-hbh-next-hole" ${scoringHoleIndex===flatHoles.length-1?'disabled':''} style="padding:8px 12px; flex-shrink:0;">›</button>
+        </div>
+        <div class="ts-team-num" style="margin-top:8px;">Hole ${hbhHole}${hbhPar !== null ? ` <span class="ts-team-so">(par ${hbhPar})</span>` : ''} <span class="ts-team-so">— Series ${hbhSeriesIndex+1}, ${scoringHoleIndex+1} of ${flatHoles.length}</span></div>
+        ${hbhRowsHtml || '<p class="ts-empty">No players on this team.</p>'}
+      </div>`;
+
     const standingsHtml = standings ? `
       <div class="ts-import-row">
         <span class="ts-import-row-label">Series results</span>
@@ -3272,6 +3406,7 @@
 
     el.innerHTML = `
       <div class="ts-roster-panel">
+        <h4 style="margin:0 0 4px;">Set up</h4>
         <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
           <span class="ts-import-row-label">Round</span>
           <div style="margin-top:6px;">
@@ -3298,9 +3433,14 @@
             ? 'Strokes are applied hole-by-hole using the hole handicaps set on the Handicaps tab — shaded cells below are where that player gets a stroke.'
             : '<span style="color:var(--rust); font-weight:600;">Hole handicaps (stroke index) aren\'t fully set on the Handicaps tab yet</span> — strokes off are being split as evenly as possible across the 3 series instead, as an approximation. Set all 18 hole handicaps for exact stroke-by-stroke allocation.'
           } Enter each player's gross score per hole below; net and bet results update as scores come in.</p>
+          <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">With this starting hole, ${groups.map((holes, si) => `Series ${si+1} is holes ${holes[0]}–${holes[holes.length-1]}`).join(', ')}. On a shotgun start, holes don't need to be entered in this order — jump straight to whichever hole your group just finished in Hole by hole below, in any order, and come back to fill in the rest later.</p>
         </div>
         ${swapRowHtml}
         ${teamCardsHtml}
+
+        <h4 style="margin:26px 0 4px; padding-top:22px; border-top:2px solid var(--ivory-line);">Live scoring</h4>
+        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Pick your team, then enter scores one hole at a time — the bet status below updates as scores come in.</p>
+        ${holeByHoleHtml}
         ${standingsHtml}
       </div>
     `;
@@ -3598,6 +3738,22 @@
         await saveData();
         await showMessage('Admin PIN updated', "The shared admin PIN has been changed. Devices that are already unlocked (roster-flagged admins, or anyone who's tapped the ⚙️ pill and entered the old PIN) stay unlocked — this only matters the next time someone unlocks admin from scratch.");
         render();
+      };
+    }
+    const changeGuestPinBtn = document.getElementById('ts-change-guest-pin');
+    if(changeGuestPinBtn){
+      changeGuestPinBtn.onclick = async () => {
+        if(!isAdmin) return;
+        while(true){
+          const newPin = await askText('Change guest PIN', "Enter a new 4-digit guest PIN. It's shown in plain text right here, so you can hand it out to guests as needed.");
+          if(newPin === null) return;
+          const trimmed = newPin.trim();
+          if(!/^\d{4}$/.test(trimmed)){ await showMessage('Needs to be 4 digits', 'Enter exactly 4 numbers, like 3672.'); continue; }
+          data.guestPin = trimmed;
+          await saveData();
+          render();
+          return;
+        }
       };
     }
     const addBtn = document.getElementById('ts-add-player');
@@ -4131,6 +4287,51 @@
     document.querySelectorAll('[data-schedule-sort]').forEach(btn => {
       btn.addEventListener('click', () => {
         scheduleSort = btn.getAttribute('data-schedule-sort');
+        render();
+      });
+    });
+
+    const hbhTeamSelect = document.getElementById('ts-hbh-team-select');
+    if(hbhTeamSelect){
+      hbhTeamSelect.addEventListener('change', () => {
+        scoringTeamIndex = parseInt(hbhTeamSelect.value, 10) || 0;
+        render();
+      });
+    }
+    const hbhPrevBtn = document.getElementById('ts-hbh-prev-hole');
+    if(hbhPrevBtn){
+      hbhPrevBtn.addEventListener('click', () => {
+        scoringHoleIndex = Math.max(0, scoringHoleIndex - 1);
+        render();
+      });
+    }
+    const hbhNextBtn = document.getElementById('ts-hbh-next-hole');
+    if(hbhNextBtn){
+      hbhNextBtn.addEventListener('click', () => {
+        scoringHoleIndex = scoringHoleIndex + 1;
+        render();
+      });
+    }
+    const hbhHoleSelect = document.getElementById('ts-hbh-hole-select');
+    if(hbhHoleSelect){
+      hbhHoleSelect.addEventListener('change', () => {
+        scoringHoleIndex = parseInt(hbhHoleSelect.value, 10) || 0;
+        render();
+      });
+    }
+    document.querySelectorAll('.ts-score-step').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const input = document.getElementById(btn.getAttribute('data-step-for'));
+        if(!input) return;
+        const dir = parseInt(btn.getAttribute('data-step-dir'), 10) || 0;
+        const current = parseInt(input.value, 10);
+        let next = (isNaN(current) ? 0 : current) + dir;
+        if(next < 1) next = 1;
+        if(next > 15) next = 15;
+        const dateKeyAttr = btn.getAttribute('data-score-date');
+        const playerId = btn.getAttribute('data-score-player');
+        const holeNum = btn.getAttribute('data-score-hole');
+        await saveScore(dateKeyAttr, playerId, holeNum, next);
         render();
       });
     });
