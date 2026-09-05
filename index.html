@@ -1,4 +1,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1B4332">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tee Sheet">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png" sizes="192x192">
+<link rel="icon" href="icon-512.png" sizes="512x512">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 
@@ -246,6 +254,15 @@
      stepped, or otherwise confirmed it yet) renders visibly different from a
      real entry, so it's obvious at a glance which holes still need a look. */
   .ts-score-input-default{ color:#a9a795; font-style:italic; border-style:dashed; }
+  .ts-score-unsaved{ border-color:var(--rust) !important; background:#FBEAE6 !important; color:var(--rust) !important; font-style:normal !important; }
+  .ts-unsaved-dot{
+    position:absolute; top:3px; left:4px; width:6px; height:6px; border-radius:50%;
+    background:var(--rust); pointer-events:none;
+  }
+  .ts-unsaved-retry{
+    margin-top:4px; background:none; border:none; padding:0; cursor:pointer;
+    font-family:'Inter',sans-serif; font-size:11.5px; font-weight:700; color:var(--rust); text-decoration:underline;
+  }
   .ts-accept-scores-btn{
     background:var(--fairway); color:var(--ivory); border:none; border-radius:9px;
     padding:11px 18px; font-family:'Inter',sans-serif; font-size:13.5px; font-weight:700;
@@ -632,11 +649,18 @@
     const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}`;
     // Content-Type text/plain avoids a CORS preflight that Apps Script Web Apps
     // don't handle well — the server still parses the body as JSON regardless.
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(obj)
     });
+    // The backend can deliberately refuse a save (e.g. its drastic-shrink safety
+    // net) with an HTTP-200 { error } body rather than a network-level failure —
+    // fetch() alone wouldn't notice that, so check explicitly and throw, which
+    // routes it through saveData()'s existing retry/failure handling below.
+    let parsed;
+    try{ parsed = JSON.parse(await res.text()); }catch(e){ return; }
+    if(parsed && parsed.error) throw new Error(parsed.error);
   }
 
   // Asks the Apps Script backend to email whoever just got promoted off
@@ -716,19 +740,72 @@
     }
     if(!round.confirmed[playerId]) round.confirmed[playerId] = {};
     round.confirmed[playerId][holeKey] = !opts.silent;
+    const errKey = scoreErrKey(dateKey, playerId, holeKey);
     try{
       const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=save_score`;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ dateKey, playerId, holeNum: holeKey, strokes, confirmed: !opts.silent })
       });
       const parsed = JSON.parse(await res.text());
+      if(parsed && parsed.error) throw new Error(parsed.error);
       if(parsed && parsed.round){
         data.rounds[dateKey] = parsed.round;
         if(typeof parsed.lastModified === 'number'){ data._lastModified = parsed.lastModified; lastKnownModified = parsed.lastModified; }
       }
-    }catch(e){ /* optimistic local edit stands; will reconcile next load */ }
+      unsavedScoreKeys.delete(errKey);
+    }catch(e){
+      // Optimistic local edit stands, but — unlike a silent par default, which just
+      // quietly gets another chance next time this hole is viewed — a real entry
+      // that didn't make it to the backend is flagged so the scorer can see it and
+      // it gets retried instead of just being lost if the tab closes.
+      if(!opts.silent) unsavedScoreKeys.add(errKey);
+    }
+  }
+
+  // Re-attempts every score save that previously failed, using whatever's currently
+  // in local state as the value to send (typically unchanged since the failure,
+  // unless someone's since corrected it, which is fine — that's the value that
+  // should win). Doesn't render itself — callers decide when that's safe (a manual
+  // tap re-renders right away; the background heartbeat below only does so when
+  // nobody's mid-edit).
+  async function retryUnsavedScores(){
+    if(!unsavedScoreKeys.size) return;
+    const keys = Array.from(unsavedScoreKeys);
+    for(const key of keys){
+      const [dateKey, playerId, holeKey] = key.split('::');
+      const round = data.rounds[dateKey];
+      if(!round){ unsavedScoreKeys.delete(key); continue; }
+      const val = (round.scores[playerId] || {})[holeKey];
+      await saveScore(dateKey, playerId, holeKey, typeof val === 'number' ? val : null);
+    }
+  }
+
+  // Runs every ~25s: retries any failed score saves, and — only while Live scoring
+  // is actually the thing on screen — pulls a fresh copy of rounds/teams so two
+  // scorers on different phones see each other's entries without either of them
+  // reloading. Skips the whole tick (not just the pull) if anything in the app has
+  // focus, so a background heartbeat can never interrupt someone mid-keystroke,
+  // on this tab or any other.
+  async function scoringHeartbeat(){
+    const active = document.activeElement;
+    const editing = active && root.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA');
+    if(editing) return;
+    let changed = false;
+    if(unsavedScoreKeys.size){ await retryUnsavedScores(); changed = true; }
+    const viewingLive = isAdmin && activeSection === 'admin' && adminSubTab === 'scoring';
+    if(viewingLive){
+      try{
+        const fetched = await fetchSharedData();
+        if(fetched && typeof fetched === 'object' && !fetched.error){
+          if(fetched.rounds){ data.rounds = fetched.rounds; changed = true; }
+          if(fetched.teams){ data.teams = fetched.teams; changed = true; }
+          if(typeof fetched._lastModified === 'number'){ data._lastModified = fetched._lastModified; lastKnownModified = fetched._lastModified; }
+        }
+      }catch(e){ /* best-effort — try again next tick */ }
+    }
+    if(changed) render();
   }
 
   async function saveRoundSettings(dateKey, patch){
@@ -775,8 +852,15 @@
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'admin'
   let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps' | 'scoring'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
-  let scoringViewMode = 'live'; // 'scoreboard' | 'live' — which half of Scoring & Bets is showing
+  let scoringViewMode = 'live'; // 'scoreboard' | 'live' | 'season' — which part of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
+  // Real (non-silent) score saves that failed to reach the backend — a course's spotty
+  // signal is exactly when this matters most, so instead of the old silent swallow,
+  // these get a visible "not saved" marker and get retried automatically (on
+  // reconnect, on the periodic Live scoring poll, or by tapping the marker) rather
+  // than quietly staying lost if the tab closes before the network comes back.
+  let unsavedScoreKeys = new Set();
+  function scoreErrKey(dateKey, playerId, holeNum){ return `${dateKey}::${playerId}::${String(holeNum)}`; }
   // Player ids this device's scorer has checked off as "who I'm actually playing with"
   // today — purely a personal, per-device convenience for ordering the hole-by-hole
   // list (see MY_GROUP_KEY), not a permission restriction. Any admin can already enter
@@ -971,19 +1055,30 @@
     if(!ok) return;
     data._lastModified = Date.now();
     const maxAttempts = 3;
+    let lastError = null;
     for(let attempt = 1; attempt <= maxAttempts; attempt++){
       try{
         await saveSharedData(data);
         lastKnownModified = data._lastModified;
         return;
       }catch(e){
-        if(attempt === maxAttempts){
-          console.error('Could not save after ' + maxAttempts + ' attempts', e);
-        }else{
-          await new Promise(r => setTimeout(r, 400 * attempt));
-        }
+        lastError = e;
+        // A deliberate refusal (like the backend's drastic-shrink safety net) will
+        // fail the exact same way every time — retrying just delays telling the
+        // admin about it, so stop immediately instead of burning all 3 attempts.
+        const deliberate = e && typeof e.message === 'string' && e.message.indexOf('Refused:') === 0;
+        if(deliberate) break;
+        if(attempt < maxAttempts) await new Promise(r => setTimeout(r, 400 * attempt));
       }
     }
+    // Previously this just logged to the console and moved on, so a refused or
+    // repeatedly-failed save could leave the admin thinking it went through when
+    // it never reached the server at all. Surface it instead.
+    console.error('Could not save', lastError);
+    await showMessage(
+      "Save didn't go through",
+      (lastError && lastError.message) || "Something went wrong saving — what you see here may not have reached the server. Try again in a moment."
+    );
   }
   async function persistMe(id){
     meId = id;
@@ -1924,6 +2019,32 @@
     return `${sign}$${Math.abs(n)}`;
   }
 
+  // Season-long $ leaderboard — rolls every dated round's team totals up to each
+  // individual player, since teams themselves are redrawn fresh for every round
+  // and aren't a stable unit across dates the way players are. A team's result for
+  // a date is shared by everyone on that team, same as the actual bet works.
+  // Rounds still in progress count too (using whatever's decided so far), same as
+  // the per-date view already does, so this stays live rather than only updating
+  // once a round is fully wrapped up. Returns [] if no round has any teams yet.
+  function computeSeasonStandings(){
+    const totals = {}; // playerId -> { id, name, total, roundsPlayed }
+    Object.keys(data.teams).forEach(dateKey => {
+      const standings = computeSeriesStandings(dateKey);
+      const teamsInfo = data.teams[dateKey];
+      if(!standings || !teamsInfo) return;
+      teamsInfo.teams.forEach((team, ti) => {
+        const teamTotal = standings.teamTotals[ti] || 0;
+        team.forEach(p => {
+          if(!totals[p.id]) totals[p.id] = { id: p.id, name: p.name, total: 0, roundsPlayed: 0 };
+          totals[p.id].name = p.name; // keep the most recent spelling on file
+          totals[p.id].total += teamTotal;
+          totals[p.id].roundsPlayed += 1;
+        });
+      });
+    });
+    return Object.values(totals).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  }
+
   // Compares this app's current data against a pasted snapshot from the other app,
   // and reports differences without changing anything. Comparisons go by player NAME
   // (not id) since the same real person can end up with different ids in each app —
@@ -2795,7 +2916,7 @@
       const generatedTeams = data.teams[key];
       const teamsHtml = generatedTeams ? `
         <div class="ts-teams-block">
-          <div class="ts-chip-group-label">Teams</div>
+          <div class="ts-chip-group-label">Suggested teams</div>
           ${generatedTeams.teams.map((team, i) => `
             <div class="ts-team-row">
               <span class="ts-team-num">Team ${i+1}</span>
@@ -3423,6 +3544,7 @@
     const lowBallHoleRunning = computeLowBallHoleRunning(dateKey);
     const gameLabel = round.game === '1ball' ? '1-ball' : '2-ball';
     const exact = holeHandicapsComplete();
+    const seasonStandings = computeSeasonStandings();
 
     const dateOptionsHtml = teamDates.slice().reverse().map(k => {
       const kd = new Date(k + 'T00:00:00');
@@ -3439,10 +3561,11 @@
         const cellsHtml = flatHoles.map(h => {
           const v = playerScores[String(h)];
           const isDefault = typeof v === 'number' && !playerConfirmed[String(h)];
+          const isUnsaved = unsavedScoreKeys.has(scoreErrKey(dateKey, p.id, h));
           const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, h) : 0;
           const strokeTitle = strokesHere > 0 ? ` title="${p.name.split(' ')[0]} gets ${strokesHere} stroke${strokesHere===1?'':'s'} here"` : '';
-          const defaultTitle = isDefault ? ' title="Showing par — not yet entered during the round"' : '';
-          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}"${strokeTitle}${defaultTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${isDefault ? ' ts-score-input-default' : ''}">${typeof v === 'number' ? v : '–'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}</span></td>`;
+          const cellTitle = isUnsaved ? ' title="Not saved yet — will retry automatically"' : (isDefault ? ' title="Showing par — not yet entered during the round"' : '');
+          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}"${strokeTitle}${cellTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${isDefault ? ' ts-score-input-default' : ''}${isUnsaved ? ' ts-score-unsaved' : ''}">${typeof v === 'number' ? v : '–'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}${isUnsaved ? '<span class="ts-unsaved-dot" title="Not saved yet"></span>' : ''}</span></td>`;
         }).join('');
         // Just a label here, not a control — switching tees happens in Live scoring,
         // so there's one place to change it, same as scores.
@@ -3531,6 +3654,7 @@
       const playerScores = round.scores[p.id] || {};
       const v = playerScores[String(hbhHole)];
       const isDefault = typeof v === 'number' && !((round.confirmed[p.id] || {})[String(hbhHole)]);
+      const isUnsaved = unsavedScoreKeys.has(scoreErrKey(dateKey, p.id, hbhHole));
       // No par fallback here anymore — the silent auto-fill above already writes a
       // real (if unconfirmed) par value into round.scores for any hole that's never
       // been touched, so v is only ever missing when someone deliberately cleared
@@ -3549,13 +3673,14 @@
                 ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${p.tee===tee?'selected':''}>${esc(tee)}</option>`).join('')}
               </select>` : ''}
             </div>
+            ${isUnsaved ? `<button type="button" class="ts-unsaved-retry" data-retry-unsaved="1" title="Tap to retry now">⚠ Not saved — tap to retry</button>` : ''}
           </div>
           <div style="display:flex; align-items:center; gap:6px;">
             <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="-1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">−</button>
             <span class="ts-score-cell-wrap">
-              <input type="number" inputmode="numeric" min="1" max="15" step="1" id="${inputId}" class="ts-score-input ts-score-input-lg${strokesHere > 0 ? ' ts-score-stroke' : ''}${isDefault ? ' ts-score-input-default' : ''}"
+              <input type="number" inputmode="numeric" min="1" max="15" step="1" id="${inputId}" class="ts-score-input ts-score-input-lg${strokesHere > 0 ? ' ts-score-stroke' : ''}${isDefault ? ' ts-score-input-default' : ''}${isUnsaved ? ' ts-score-unsaved' : ''}"
                 data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}"
-                value="${displayVal}" title="${isDefault ? 'Showing par — tap to enter the real score' : ''}">
+                value="${displayVal}" title="${isUnsaved ? 'Not saved yet — will retry automatically' : (isDefault ? 'Showing par — tap to enter the real score' : '')}">
               ${strokesHere > 0 ? '<span class="ts-stroke-dot ts-stroke-dot-lg"></span>' : ''}
             </span>
             <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">+</button>
@@ -3638,6 +3763,18 @@
         </div>
       </div>` : '';
 
+    // Season-wide rollup — not tied to the date picker above at all, since it's
+    // every dated round added together. Still updates live off rounds in
+    // progress, same as the per-date series results do.
+    const seasonStandingsHtml = seasonStandings.length ? `
+      <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+        <span class="ts-import-row-label">Season standings</span>
+        <p style="margin:6px 0 10px;">Every dated round's $ results, added up per player — teams are redrawn each round, so this tracks people rather than teams. Rounds still in progress count too, using whatever's been decided so far.</p>
+        <div class="ts-teams-block">
+          ${seasonStandings.map(p => `<div class="ts-bet-row"><span class="ts-bet-label">${esc(p.name)} <span class="ts-team-so">(${p.roundsPlayed} round${p.roundsPlayed===1?'':'s'})</span></span><span class="ts-bet-result" style="color:${p.total>0?'var(--fairway)':p.total<0?'var(--rust)':'inherit'};">${fmtMoney(p.total)}</span></div>`).join('')}
+        </div>
+      </div>` : '<p class="ts-empty">No rounds with teams and a $ result yet.</p>';
+
     el.innerHTML = `
       <div class="ts-roster-panel">
         <h4 style="margin:0 0 4px;">Set up</h4>
@@ -3684,6 +3821,7 @@
         <div class="ts-subtabbar" style="margin-top:22px; padding-top:22px; border-top:2px solid var(--ivory-line);">
           <button class="ts-subtab ${scoringViewMode==='scoreboard'?'active':''}" data-scoring-view="scoreboard">Match scoreboard</button>
           <button class="ts-subtab ${scoringViewMode==='live'?'active':''}" data-scoring-view="live">Live scoring</button>
+          <button class="ts-subtab ${scoringViewMode==='season'?'active':''}" data-scoring-view="season">Season standings</button>
         </div>
 
         ${scoringViewMode === 'scoreboard' ? `
@@ -3692,6 +3830,9 @@
           ${teamCardsHtml}
           ${lowBallProgressHtml}
           ${standingsHtml}
+        ` : scoringViewMode === 'season' ? `
+          <h4 style="margin:16px 0 4px;">Season standings</h4>
+          ${seasonStandingsHtml}
         ` : `
           <h4 style="margin:16px 0 4px;">Live scoring</h4>
           <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Enter scores one hole at a time for anyone in the bet — the only place scores get entered. Switch to Match scoreboard above to see how things stand.</p>
@@ -4658,6 +4799,13 @@
       });
     });
 
+    document.querySelectorAll('[data-retry-unsaved]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await retryUnsavedScores();
+        render();
+      });
+    });
+
     const dutyFilterSel = document.getElementById('ts-duty-filter');
     if(dutyFilterSel){
       dutyFilterSel.onchange = () => { dutyFilterId = dutyFilterSel.value; render(); };
@@ -4927,6 +5075,11 @@
     await reverifyIfNeeded();
     await autoIdentifyIfNeeded();
     render();
+
+    // Retry failed score saves as soon as the device thinks it's back online,
+    // rather than waiting for the next heartbeat tick.
+    window.addEventListener('online', () => { scoringHeartbeat(); });
+    setInterval(scoringHeartbeat, 25000);
   })();
 })();
 </script>
