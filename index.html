@@ -216,6 +216,10 @@
     width:30px; font-family:'IBM Plex Mono',monospace; font-size:12.5px; text-align:center;
     padding:4px 2px; border-radius:5px; border:1px solid var(--ivory-line);
   }
+  .ts-score-display{
+    display:inline-block; width:30px; font-family:'IBM Plex Mono',monospace; font-size:12.5px;
+    text-align:center; padding:4px 2px; border-radius:5px; border:1px solid transparent; color:var(--ink);
+  }
   .ts-score-input-lg{
     width:64px; font-size:22px; padding:10px 4px; border-radius:9px; border-width:1.5px;
     flex-shrink:0;
@@ -228,6 +232,25 @@
   .ts-score-step:active{ background:var(--ivory-line); }
   .ts-score-table td.ts-score-stroke{ background:#FBF3E4; }
   .ts-score-table td.ts-score-stroke .ts-score-input{ border-color:var(--brass); }
+  .ts-score-table td.ts-score-stroke .ts-score-display{ border-color:var(--brass); }
+  .ts-lowball-row td{ font-weight:700; border-top:2px solid var(--ivory-line); padding-top:6px; color:var(--fairway); }
+  .ts-lowball-row td.ts-score-name{ color:var(--ink); font-weight:600; }
+  .ts-score-cell-wrap{ position:relative; display:inline-block; }
+  .ts-stroke-dot{
+    position:absolute; top:3px; right:4px; width:6px; height:6px; border-radius:50%;
+    background:var(--brass); pointer-events:none;
+  }
+  .ts-stroke-dot-lg{ width:10px; height:10px; top:7px; right:9px; }
+  /* A score still sitting at its silent par default (nobody has actually typed,
+     stepped, or otherwise confirmed it yet) renders visibly different from a
+     real entry, so it's obvious at a glance which holes still need a look. */
+  .ts-score-input-default{ color:#a9a795; font-style:italic; border-style:dashed; }
+  .ts-accept-scores-btn{
+    background:var(--fairway); color:var(--ivory); border:none; border-radius:9px;
+    padding:11px 18px; font-family:'Inter',sans-serif; font-size:13.5px; font-weight:700;
+    cursor:pointer; width:100%; max-width:360px;
+  }
+  .ts-accept-scores-btn:active{ background:var(--fairway-dark); }
   .ts-hh-row{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .ts-hh-cell{ display:flex; flex-direction:column; align-items:center; gap:2px; width:38px; }
   .ts-hh-cell label{ font-family:'IBM Plex Mono',monospace; font-size:10px; color:#8b8a7c; }
@@ -552,6 +575,7 @@
   const ADMIN_GATE_KEY = IS_LIVE_ENV ? 'golf-league-admin-gate-players' : 'golf-league-admin-gate-players-TEST';
   const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
   const GUEST_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-guest-unlocked' : 'golf-league-guest-unlocked-TEST';
+  const MY_GROUP_KEY = IS_LIVE_ENV ? 'golf-league-my-group' : 'golf-league-my-group-TEST';
   const PLAYERS_PER_TEE_TIME = 4;
   // The club never gives us more than 3 tee times, so pre-confirmation
   // estimates should never assume a 4th one is possible.
@@ -667,20 +691,36 @@
   // lock-serializes these and merges just the one hole/setting, so one
   // group's entry can't silently clobber another's the way a full-blob
   // overwrite could. The server's returned round object is authoritative.
-  async function saveScore(dateKey, playerId, holeNum, strokes){
-    ensureRoundDefaults(dateKey);
-    if(typeof strokes === 'number' && strokes > 0){
-      if(!data.rounds[dateKey].scores[playerId]) data.rounds[dateKey].scores[playerId] = {};
-      data.rounds[dateKey].scores[playerId][String(holeNum)] = strokes;
-    } else if(data.rounds[dateKey].scores[playerId]){
-      delete data.rounds[dateKey].scores[playerId][String(holeNum)];
+  // opts.silent marks this as the automatic par pre-fill (not something a person
+  // actually typed, stepped, or cleared) — everything else counts as a real,
+  // confirmed entry, including an intentional clear. A silent call is a no-op if
+  // there's already any score on file (real, or a prior default — including one
+  // saved before "confirmed" tracking existed) or if this hole's been touched in
+  // any way before, so it never clobbers a genuine entry or fights back against
+  // someone who deliberately blanked a score out.
+  async function saveScore(dateKey, playerId, holeNum, strokes, opts){
+    opts = opts || {};
+    const round = ensureRoundDefaults(dateKey);
+    const holeKey = String(holeNum);
+    if(opts.silent){
+      const existing = (round.scores[playerId] || {})[holeKey];
+      const already = round.confirmed[playerId] && (holeKey in round.confirmed[playerId]);
+      if(typeof existing === 'number' || already) return;
     }
+    if(typeof strokes === 'number' && strokes > 0){
+      if(!round.scores[playerId]) round.scores[playerId] = {};
+      round.scores[playerId][holeKey] = strokes;
+    } else if(round.scores[playerId]){
+      delete round.scores[playerId][holeKey];
+    }
+    if(!round.confirmed[playerId]) round.confirmed[playerId] = {};
+    round.confirmed[playerId][holeKey] = !opts.silent;
     try{
       const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=save_score`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ dateKey, playerId, holeNum: String(holeNum), strokes })
+        body: JSON.stringify({ dateKey, playerId, holeNum: holeKey, strokes, confirmed: !opts.silent })
       });
       const parsed = JSON.parse(await res.text());
       if(parsed && parsed.round){
@@ -734,8 +774,14 @@
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'admin'
   let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps' | 'scoring'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
-  let scoringTeamIndex = 0; // which team's card is showing in the hole-by-hole view
+  let scoringViewMode = 'live'; // 'scoreboard' | 'live' — which half of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
+  // Player ids this device's scorer has checked off as "who I'm actually playing with"
+  // today — purely a personal, per-device convenience for ordering the hole-by-hole
+  // list (see MY_GROUP_KEY), not a permission restriction. Any admin can already enter
+  // scores for anyone; this just saves them from hunting through everyone alphabetically
+  // when their real-life foursome doesn't match the app's drafted bet teams.
+  let myGroupIds = [];
   let dutySort = 'date'; // 'date' | 'person'
   let dutyFilterId = ''; // '' = everyone, '__me__' = current identity, or a player id
   let scheduleFilterId = ''; // same idea, for the Upcoming Dates list
@@ -884,6 +930,10 @@
       const ver = localStorage.getItem(VERIFIED_KEY);
       verifiedPlayers = ver ? JSON.parse(ver) : [];
     }catch(e){ verifiedPlayers = []; }
+    try{
+      const grp = localStorage.getItem(MY_GROUP_KEY);
+      myGroupIds = grp ? JSON.parse(grp) : [];
+    }catch(e){ myGroupIds = []; }
     // Self-heal: if this load turned up ghost signups or teams missing computed
     // handicap fields, persist the cleanup in the background so the fix sticks for
     // everyone, not just this client's view. Fire-and-forget — never block the
@@ -950,6 +1000,10 @@
   }
   async function persistVerified(){
     try{ localStorage.setItem(VERIFIED_KEY, JSON.stringify(verifiedPlayers)); }catch(e){}
+  }
+
+  function persistMyGroup(){
+    try{ localStorage.setItem(MY_GROUP_KEY, JSON.stringify(myGroupIds)); }catch(e){}
   }
 
   function dutyForKey(key){
@@ -1705,14 +1759,47 @@
   function ensureRoundDefaults(dateKey){
     if(!data.rounds[dateKey]) data.rounds[dateKey] = { startHole: 1, stakePerSeries: 1, scores: {} };
     if(!data.rounds[dateKey].scores) data.rounds[dateKey].scores = {};
+    // Tracks, per player/hole, whether a stored score is a real entry (true) vs. the
+    // silent par default filled in just so a hole isn't blank while it's on screen
+    // (false, or simply absent if the hole's never been touched at all). Lets the
+    // scoreboard show at a glance which holes still need someone to actually look.
+    if(!data.rounds[dateKey].confirmed) data.rounds[dateKey].confirmed = {};
     if(typeof data.rounds[dateKey].startHole !== 'number') data.rounds[dateKey].startHole = 1;
     if(typeof data.rounds[dateKey].stakePerSeries !== 'number') data.rounds[dateKey].stakePerSeries = 1;
+    if(data.rounds[dateKey].game !== '1ball' && data.rounds[dateKey].game !== '2ball') data.rounds[dateKey].game = '2ball';
     return data.rounds[dateKey];
   }
 
-  // For each team and series: whether every player on the team has all 6
-  // holes entered, and if so, the team's net total for that series. Then
+  // How many of a team's net scores on a hole count toward its low-ball total —
+  // a fixed choice per round ('1ball' = the single lowest net counts, '2ball' =
+  // the two lowest count), independent of team size. Picked in Round setup.
+  function lowBallCountFor(game){
+    return game === '1ball' ? 1 : 2;
+  }
+
+  // A team's used (counted) net score on one hole: the sum of its K lowest
+  // players' net scores that hole, or null if any player on the team is
+  // missing a score for it (we don't know who the lowest K would be until
+  // everyone's in). Shared by the $ standings, the live progress line, and the
+  // scorecard's running-total row below, so all three always agree.
+  function teamLowBallHoleNet(team, holeNum, scores, K){
+    const nets = [];
+    for(const p of team){
+      const v = (scores[p.id] || {})[String(holeNum)];
+      if(typeof v !== 'number') return null;
+      nets.push(v - strokesReceivedOnHole(p.strokesOff, holeNum));
+    }
+    nets.sort((a, b) => a - b);
+    return nets.slice(0, Math.min(K, nets.length)).reduce((s, x) => s + x, 0);
+  }
+
+  // For each team and series: whether every player needed has all 6 holes
+  // entered, and if so, the team's low-ball net total for that series (sum,
+  // hole by hole, of its K lowest net scores — see lowBallCountFor). Then
   // every team-pair's result per series, and each team's running $ total.
+  // Needs exact hole handicaps, since strokes have to land on one specific
+  // hole to know a player's net for it, rather than split evenly across a
+  // series.
   function computeSeriesStandings(dateKey){
     const teamsInfo = data.teams[dateKey];
     const round = data.rounds[dateKey];
@@ -1721,23 +1808,18 @@
     const scores = round.scores || {};
     const stake = round.stakePerSeries;
     const exact = holeHandicapsComplete();
+    const game = round.game === '1ball' ? '1ball' : '2ball';
+    const K = lowBallCountFor(game);
 
     const teamSeriesNet = teamsInfo.teams.map(team => {
-      return groups.map((holes, si) => {
+      return groups.map(holes => {
+        if(!exact) return { complete: false, net: 0 };
         let complete = true;
         let net = 0;
-        team.forEach(p => {
-          const playerScores = scores[p.id] || {};
-          let gross = 0;
-          let strokes = 0;
-          holes.forEach(h => {
-            const v = playerScores[String(h)];
-            if(typeof v !== 'number'){ complete = false; }
-            else gross += v;
-            if(exact) strokes += strokesReceivedOnHole(p.strokesOff, h);
-          });
-          if(!exact) strokes = strokesForSeries(p.strokesOff)[si];
-          net += gross - strokes;
+        holes.forEach(h => {
+          const used = teamLowBallHoleNet(team, h, scores, K);
+          if(used === null){ complete = false; return; }
+          net += used;
         });
         return { complete, net };
       });
@@ -1766,7 +1848,74 @@
       else if(m.result === 'B'){ teamTotals[m.teamB] += stake; teamTotals[m.teamA] -= stake; }
     });
 
-    return { groups, teamSeriesNet, matchups, teamTotals, stake, exact };
+    return { groups, teamSeriesNet, matchups, teamTotals, stake, exact, game };
+  }
+
+  // Live "vs. par, thru N" summary per series — separate from the $ standings
+  // above because it's meaningful mid-series (as soon as any hole is fully in,
+  // not just once a whole series is complete), and because holes can come in
+  // out of order on a shotgun start. Only counts holes that have both a par
+  // entered and every team member's score in; "thru" reflects how many of the
+  // series' holes are usable that way, not necessarily how far the group has
+  // physically played. Returns null if hole handicaps aren't fully set.
+  function computeLowBallProgress(dateKey){
+    const teamsInfo = data.teams[dateKey];
+    const round = data.rounds[dateKey];
+    if(!teamsInfo || !round || !holeHandicapsComplete()) return null;
+    const groups = seriesHoleGroups(round.startHole);
+    const scores = round.scores || {};
+    const K = lowBallCountFor(round.game);
+    return teamsInfo.teams.map(team => {
+      return groups.map(holes => {
+        let holesCounted = 0;
+        let relToPar = 0;
+        holes.forEach(h => {
+          const par = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
+          if(par === null) return;
+          const used = teamLowBallHoleNet(team, h, scores, K);
+          if(used === null) return;
+          relToPar += used - K * par;
+          holesCounted++;
+        });
+        return { holesCounted, holesInSeries: holes.length, relToPar };
+      });
+    });
+  }
+
+  // Per-hole running "vs. par" total for the scorecard's own footer row — the
+  // cumulative total through each hole, resetting at the start of each series
+  // (matching how the $ bet is settled series by series). A hole's value is
+  // only shown once that hole itself is complete; holes still missing a score
+  // are left blank rather than carrying the previous number forward, so a gap
+  // from a shotgun start reads as "not in yet" rather than "no change here."
+  // Returns null if hole handicaps aren't fully set.
+  function computeLowBallHoleRunning(dateKey){
+    const teamsInfo = data.teams[dateKey];
+    const round = data.rounds[dateKey];
+    if(!teamsInfo || !round || !holeHandicapsComplete()) return null;
+    const groups = seriesHoleGroups(round.startHole);
+    const scores = round.scores || {};
+    const K = lowBallCountFor(round.game);
+    return teamsInfo.teams.map(team => {
+      const byHole = {};
+      groups.forEach(holes => {
+        let running = 0;
+        holes.forEach(h => {
+          const par = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
+          if(par === null) return;
+          const used = teamLowBallHoleNet(team, h, scores, K);
+          if(used === null) return;
+          running += used - K * par;
+          byHole[h] = running;
+        });
+      });
+      return byHole;
+    });
+  }
+
+  function fmtRelToPar(n){
+    if(n === 0) return 'E';
+    return n > 0 ? `+${n}` : `${n}`;
   }
 
   function fmtMoney(n){
@@ -3269,6 +3418,9 @@
     const groups = seriesHoleGroups(round.startHole);
     const flatHoles = groups.flat();
     const standings = computeSeriesStandings(dateKey);
+    const lowBallProgress = computeLowBallProgress(dateKey);
+    const lowBallHoleRunning = computeLowBallHoleRunning(dateKey);
+    const gameLabel = round.game === '1ball' ? '1-ball' : '2-ball';
     const exact = holeHandicapsComplete();
 
     const dateOptionsHtml = teamDates.slice().reverse().map(k => {
@@ -3276,19 +3428,33 @@
       return `<option value="${k}" ${k===dateKey?'selected':''}>${DOW_NAMES[kd.getDay()]}, ${MON_NAMES[kd.getMonth()]} ${kd.getDate()}</option>`;
     }).join('');
 
+    // Match scoreboard is read-only — a summary to glance at, not where scores get
+    // entered (that's Live scoring only, one hole at a time, so there's exactly one
+    // place to type a number and no risk of two views fighting over the same cell).
     const teamCardsHtml = teamsInfo.teams.map((team, ti) => {
       const rowsHtml = team.map(p => {
         const playerScores = round.scores[p.id] || {};
+        const playerConfirmed = (round.confirmed || {})[p.id] || {};
         const cellsHtml = flatHoles.map(h => {
           const v = playerScores[String(h)];
+          const isDefault = typeof v === 'number' && !playerConfirmed[String(h)];
           const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, h) : 0;
           const strokeTitle = strokesHere > 0 ? ` title="${p.name.split(' ')[0]} gets ${strokesHere} stroke${strokesHere===1?'':'s'} here"` : '';
-          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}"${strokeTitle}><input type="number" inputmode="numeric" min="1" max="15" step="1" class="ts-score-input"
-                    data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${h}"
-                    value="${typeof v === 'number' ? v : ''}"></td>`;
+          const defaultTitle = isDefault ? ' title="Showing par — not yet entered during the round"' : '';
+          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}"${strokeTitle}${defaultTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${isDefault ? ' ts-score-input-default' : ''}">${typeof v === 'number' ? v : '–'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}</span></td>`;
         }).join('');
-        return `<tr><td class="ts-score-name">${esc(p.name)}${p.strokesOff ? ` <span class="ts-team-so">(S.O. ${p.strokesOff})</span>` : ''}</td>${cellsHtml}</tr>`;
+        // Just a label here, not a control — switching tees happens in Live scoring,
+        // so there's one place to change it, same as scores.
+        const teeLabelHtml = p.tee ? `<br><span class="ts-team-so">${esc(p.tee)}</span>` : '';
+        return `<tr><td class="ts-score-name">${esc(p.name)}${p.strokesOff ? ` <span class="ts-team-so">(S.O. ${p.strokesOff})</span>` : ''}${teeLabelHtml}</td>${cellsHtml}</tr>`;
       }).join('');
+
+      const runningForTeam = lowBallHoleRunning ? lowBallHoleRunning[ti] : null;
+      const runningRowHtml = runningForTeam ? `
+        <tr class="ts-lowball-row">
+          <td class="ts-score-name">${gameLabel} vs par</td>
+          ${flatHoles.map(h => `<td>${typeof runningForTeam[h] === 'number' ? fmtRelToPar(runningForTeam[h]) : ''}</td>`).join('')}
+        </tr>` : '';
 
       return `
         <div class="ts-teams-block" style="margin-top:16px;">
@@ -3297,70 +3463,122 @@
             <table class="ts-score-table">
               <thead>
                 <tr><th></th><th colspan="${HOLES_PER_SERIES}">Series 1</th><th colspan="${HOLES_PER_SERIES}">Series 2</th><th colspan="${HOLES_PER_SERIES}">Series 3</th></tr>
-                <tr><th></th>${flatHoles.map(h => `<th>${h}</th>`).join('')}</tr>
+                <tr><th>Hole number</th>${flatHoles.map(h => `<th>${h}</th>`).join('')}</tr>
                 ${Object.keys(data.holePars).length ? `<tr class="ts-par-row"><th>Par</th>${flatHoles.map(h => `<th>${typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : ''}</th>`).join('')}</tr>` : ''}
               </thead>
-              <tbody>${rowsHtml}</tbody>
+              <tbody>${rowsHtml}${runningRowHtml}</tbody>
             </table>
           </div>
         </div>`;
     }).join('');
 
-    // Hole-by-hole view: pick your own team, see just your playing partners, one
-    // hole at a time — meant for a group entering their own scores together after
-    // each hole, without seeing (or needing to see) the other team's card. Same
-    // data-score-* attributes as the scorecard grid, so scores entered here save
-    // through the exact same saveScore() wiring — just a different, narrower layout
-    // over the same data. The bet's live status further down still reflects every
-    // team's scores as they come in, regardless of who's looking.
-    if(scoringTeamIndex >= teamsInfo.teams.length) scoringTeamIndex = 0;
+    // Hole-by-hole view: everyone in today's bet, one hole at a time, ordered by
+    // "Playing with" below (see myGroupIds) rather than by the app's drafted bet
+    // teams — a scorer's real-life foursome doesn't always match those teams, and
+    // anyone can already enter anyone's score here. Same data-score-* attributes as
+    // the scorecard grid, so scores entered here save through the exact same
+    // saveScore() wiring — just a different, reordered layout over the same data.
+    // The bet's live status further down still reflects every team's scores as they
+    // come in, regardless of who's looking.
     if(scoringHoleIndex >= flatHoles.length) scoringHoleIndex = flatHoles.length - 1;
     if(scoringHoleIndex < 0) scoringHoleIndex = 0;
-    const hbhTeam = teamsInfo.teams[scoringTeamIndex] || [];
     const hbhHole = flatHoles[scoringHoleIndex];
     const hbhSeriesIndex = groups.findIndex(g => g.includes(hbhHole));
     const hbhPar = typeof data.holePars[String(hbhHole)] === 'number' ? data.holePars[String(hbhHole)] : null;
 
-    const teamPickerHtml = teamsInfo.teams.length > 1 ? `
-      <div style="margin-top:6px;">
-        <select id="ts-hbh-team-select" style="font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
-          ${teamsInfo.teams.map((team, ti) => `<option value="${ti}" ${ti===scoringTeamIndex?'selected':''}>Team ${ti+1} — ${team.map(p => p.name.split(' ')[0]).join(', ')}</option>`).join('')}
-        </select>
+    // Anyone can enter scores for anyone here — the app's teams are for the bet, not
+    // necessarily who's actually standing together on the course. "Playing with" below
+    // just reorders this list, pinning a scorer's real-life foursome to the top so
+    // they're not hunting through everyone alphabetically between shots.
+    const allRoundPlayers = teamsInfo.teams.flat();
+    const pinnedIds = new Set(myGroupIds);
+    const pinnedPlayers = allRoundPlayers.filter(p => pinnedIds.has(p.id));
+    const otherPlayers = allRoundPlayers.filter(p => !pinnedIds.has(p.id));
+
+    const playingWithHtml = allRoundPlayers.length ? `
+      <div class="ts-import-row" style="margin-top:16px;">
+        <span class="ts-import-row-label">Playing with</span>
+        <p style="margin:6px 0 8px;">Check the guys you're actually on the course with today — they'll move to the top of the list below so you're not hunting for names between shots. This doesn't restrict who can enter scores for whom.</p>
+        <div style="display:flex; flex-wrap:wrap; gap:8px 16px;">
+          ${allRoundPlayers.map(p => `
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-family:'Inter',sans-serif; font-weight:500;">
+              <input type="checkbox" data-playing-with="${p.id}" ${pinnedIds.has(p.id) ? 'checked' : ''}>
+              ${esc(p.name)}
+            </label>`).join('')}
+        </div>
       </div>` : '';
 
     // Default an unset score to par for this hole, so a group that made par can
     // just confirm and move on instead of typing every number — toggle it up or
-    // down with the +/- buttons, or leave it alone to accept par. The default is
-    // saved silently the moment this hole/team is viewed (harmless to re-save if
-    // it's already on file, and it stops as soon as a real score is on record).
+    // down with the +/- buttons, or leave it alone to accept par. Never fires when
+    // a score is already on file — real or a prior silent default — so it can't
+    // clobber a genuine entry (including scores saved before "confirmed" tracking
+    // existed at all). It also never re-fires once a hole has been touched in any
+    // way (gated on round.confirmed), so deliberately clearing a score back out —
+    // to test with, or because it was a mis-entry — doesn't get silently refilled
+    // with par on the very next render. Applies to everyone in the round now, not
+    // just one team, since the list below always shows everyone.
     if(hbhPar !== null){
-      hbhTeam.forEach(p => {
+      allRoundPlayers.forEach(p => {
         const existing = (round.scores[p.id] || {})[String(hbhHole)];
-        if(typeof existing !== 'number') saveScore(dateKey, p.id, hbhHole, hbhPar).catch(()=>{});
+        const touched = round.confirmed[p.id] && (String(hbhHole) in round.confirmed[p.id]);
+        if(typeof existing !== 'number' && !touched) saveScore(dateKey, p.id, hbhHole, hbhPar, {silent: true}).catch(()=>{});
       });
     }
 
-    const hbhRowsHtml = hbhTeam.map(p => {
+    const hbhRowHtml = (p) => {
       const playerScores = round.scores[p.id] || {};
       const v = playerScores[String(hbhHole)];
-      const displayVal = typeof v === 'number' ? v : (hbhPar !== null ? hbhPar : '');
+      const isDefault = typeof v === 'number' && !((round.confirmed[p.id] || {})[String(hbhHole)]);
+      // No par fallback here anymore — the silent auto-fill above already writes a
+      // real (if unconfirmed) par value into round.scores for any hole that's never
+      // been touched, so v is only ever missing when someone deliberately cleared
+      // it. Showing it truly blank in that case (instead of quietly redrawing par)
+      // is the whole point — an empty box means empty, not "still deciding."
+      const displayVal = typeof v === 'number' ? v : '';
       const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, hbhHole) : 0;
       const inputId = `ts-hbh-score-${p.id}`;
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--ivory-line);">
           <div>
             <div style="font-weight:600; font-size:15px;">${esc(p.name)}</div>
-            <div style="font-size:11.5px; color:#8b8a7c;">${p.strokesOff ? `S.O. ${p.strokesOff}` : ''}${strokesHere > 0 ? ' · gets a stroke here' : ''}</div>
+            <div style="font-size:11.5px; color:#8b8a7c; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+              <span>${p.strokesOff ? `S.O. ${p.strokesOff}` : ''}${strokesHere > 0 ? ' · gets a stroke here' : ''}${isDefault ? ' · showing par, not yet entered' : ''}</span>
+              ${data.teeOptions.length ? `<select data-team-tee-player="${p.id}" data-team-tee-date="${dateKey}" title="Switch ${p.name.split(' ')[0]}'s tee for today only" style="font-family:'Inter',sans-serif; font-size:10.5px; padding:1px 3px; border-radius:4px; border:1px solid var(--ivory-line); color:#6b6a5e;">
+                ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${p.tee===tee?'selected':''}>${esc(tee)}</option>`).join('')}
+              </select>` : ''}
+            </div>
           </div>
           <div style="display:flex; align-items:center; gap:6px;">
             <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="-1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">−</button>
-            <input type="number" inputmode="numeric" min="1" max="15" step="1" id="${inputId}" class="ts-score-input ts-score-input-lg${strokesHere > 0 ? ' ts-score-stroke' : ''}"
-              data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}"
-              value="${displayVal}">
+            <span class="ts-score-cell-wrap">
+              <input type="number" inputmode="numeric" min="1" max="15" step="1" id="${inputId}" class="ts-score-input ts-score-input-lg${strokesHere > 0 ? ' ts-score-stroke' : ''}${isDefault ? ' ts-score-input-default' : ''}"
+                data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}"
+                value="${displayVal}" title="${isDefault ? 'Showing par — tap to enter the real score' : ''}">
+              ${strokesHere > 0 ? '<span class="ts-stroke-dot ts-stroke-dot-lg"></span>' : ''}
+            </span>
             <button type="button" class="ts-score-step" data-step-for="${inputId}" data-step-dir="1" data-score-date="${dateKey}" data-score-player="${p.id}" data-score-hole="${hbhHole}">+</button>
           </div>
         </div>`;
-    }).join('');
+    };
+
+    // Typing over the par default is one way to confirm a score, but a group that
+    // actually made par never touches that field, so it'd sit there looking
+    // "unconfirmed" forever. This button marks whatever's currently showing —
+    // touched or still at par — as the real, confirmed score, without changing any
+    // numbers. It's scoped to "Playing with" (the scorer's own group) when that's
+    // set, since that's the group this button sits directly below; otherwise it
+    // covers everyone on the hole.
+    const acceptScoresHtml = (players, label) => players.length ? `
+      <div style="padding:10px 0 4px; text-align:center;">
+        <button type="button" class="ts-accept-scores-btn" data-accept-date="${dateKey}" data-accept-hole="${hbhHole}" data-accept-ids="${players.map(p => p.id).join(',')}">Accept ${label} for hole ${hbhHole}</button>
+      </div>` : '';
+
+    const hbhRowsHtml = pinnedPlayers.map(hbhRowHtml).join('')
+      + acceptScoresHtml(pinnedPlayers, "my group's scores")
+      + (pinnedPlayers.length && otherPlayers.length ? `<div class="ts-team-so" style="margin-top:10px; padding-top:8px; text-transform:uppercase; letter-spacing:.05em; font-size:10.5px;">Everyone else</div>` : '')
+      + otherPlayers.map(hbhRowHtml).join('')
+      + (!pinnedPlayers.length ? acceptScoresHtml(otherPlayers, "everyone's scores") : '');
 
     const holeJumpOptionsHtml = flatHoles.map((h, idx) => {
       const p = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
@@ -3368,10 +3586,7 @@
     }).join('');
 
     const holeByHoleHtml = `
-      <div class="ts-import-row" style="margin-top:16px;">
-        <span class="ts-import-row-label">Your team</span>
-        ${teamPickerHtml || `<p style="margin:6px 0 0;">Team 1 — ${hbhTeam.map(p => p.name.split(' ')[0]).join(', ')}</p>`}
-      </div>
+      ${playingWithHtml}
       <div class="ts-teams-block" style="margin-top:16px;">
         <div style="display:flex; align-items:center; gap:8px;">
           <button id="ts-hbh-prev-hole" ${scoringHoleIndex===0?'disabled':''} style="padding:8px 12px; flex-shrink:0;">‹</button>
@@ -3381,12 +3596,30 @@
           <button id="ts-hbh-next-hole" ${scoringHoleIndex===flatHoles.length-1?'disabled':''} style="padding:8px 12px; flex-shrink:0;">›</button>
         </div>
         <div class="ts-team-num" style="margin-top:8px;">Hole ${hbhHole}${hbhPar !== null ? ` <span class="ts-team-so">(par ${hbhPar})</span>` : ''} <span class="ts-team-so">— Series ${hbhSeriesIndex+1}, ${scoringHoleIndex+1} of ${flatHoles.length}</span></div>
-        ${hbhRowsHtml || '<p class="ts-empty">No players on this team.</p>'}
+        ${hbhRowsHtml || '<p class="ts-empty">No players in the bet for this date.</p>'}
       </div>`;
+
+    const lowBallProgressHtml = lowBallProgress ? `
+      <div class="ts-import-row">
+        <span class="ts-import-row-label">Live vs. par (low ball)</span>
+        <div class="ts-teams-block">
+          ${teamsInfo.teams.map((team, ti) => `
+            <div class="ts-team-row">
+              <div class="ts-team-num">Team ${ti+1}</div>
+              ${groups.map((holes, si) => {
+                const prog = lowBallProgress[ti][si];
+                const label = prog.holesCounted === 0
+                  ? '<span class="ts-empty">not started</span>'
+                  : `${fmtRelToPar(prog.relToPar)} <span class="ts-team-so">thru ${prog.holesCounted} of ${prog.holesInSeries}</span>`;
+                return `<div class="ts-bet-row"><span class="ts-bet-label">Series ${si+1}</span><span class="ts-bet-result">${label}</span></div>`;
+              }).join('')}
+            </div>`).join('')}
+        </div>
+      </div>` : '';
 
     const standingsHtml = standings ? `
       <div class="ts-import-row">
-        <span class="ts-import-row-label">Series results</span>
+        <span class="ts-import-row-label">Series results (${standings.game === '1ball' ? '1-ball' : '2-ball'})</span>
         ${groups.map((holes, si) => {
           const rowsHtml = standings.matchups.filter(m => m.seriesIndex === si).map(m => {
             let resultText;
@@ -3428,20 +3661,41 @@
               <span style="margin-left:6px;">$</span><input id="ts-round-stake" type="number" min="0" step="1" value="${round.stakePerSeries}"
                 style="width:50px; font-family:'Inter'; font-size:13px; padding:6px 8px; border-radius:7px; border:1px solid var(--ivory-line);">
             </label>
+            <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Game
+              <select id="ts-round-game" style="margin-left:6px; font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+                <option value="1ball" ${round.game==='1ball'?'selected':''}>1-ball</option>
+                <option value="2ball" ${round.game==='2ball'?'selected':''}>2-ball</option>
+              </select>
+            </label>
           </div>
           <p style="margin:8px 0 0;">${exact
             ? 'Strokes are applied hole-by-hole using the hole handicaps set on the Handicaps tab — shaded cells below are where that player gets a stroke.'
             : '<span style="color:var(--rust); font-weight:600;">Hole handicaps (stroke index) aren\'t fully set on the Handicaps tab yet</span> — strokes off are being split as evenly as possible across the 3 series instead, as an approximation. Set all 18 hole handicaps for exact stroke-by-stroke allocation.'
           } Enter each player's gross score per hole below; net and bet results update as scores come in.</p>
+          <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">${round.game === '1ball'
+            ? '1-ball: each hole, only the team\'s single lowest net score counts, compared to that hole\'s par.'
+            : '2-ball: each hole, the team\'s two lowest net scores count, compared to twice that hole\'s par.'
+          } Needs exact hole handicaps (see above) to allocate strokes hole by hole.</p>
           <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">With this starting hole, ${groups.map((holes, si) => `Series ${si+1} is holes ${holes[0]}–${holes[holes.length-1]}`).join(', ')}. On a shotgun start, holes don't need to be entered in this order — jump straight to whichever hole your group just finished in Hole by hole below, in any order, and come back to fill in the rest later.</p>
         </div>
         ${swapRowHtml}
-        ${teamCardsHtml}
 
-        <h4 style="margin:26px 0 4px; padding-top:22px; border-top:2px solid var(--ivory-line);">Live scoring</h4>
-        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Pick your team, then enter scores one hole at a time — the bet status below updates as scores come in.</p>
-        ${holeByHoleHtml}
-        ${standingsHtml}
+        <div class="ts-subtabbar" style="margin-top:22px; padding-top:22px; border-top:2px solid var(--ivory-line);">
+          <button class="ts-subtab ${scoringViewMode==='scoreboard'?'active':''}" data-scoring-view="scoreboard">Match scoreboard</button>
+          <button class="ts-subtab ${scoringViewMode==='live'?'active':''}" data-scoring-view="live">Live scoring</button>
+        </div>
+
+        ${scoringViewMode === 'scoreboard' ? `
+          <h4 style="margin:16px 0 4px;">Match scoreboard</h4>
+          <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Every team's card, running totals, and the bet's series-by-series results — read-only, for a glance at how the match stands. Switch to Live scoring to enter or change a score.</p>
+          ${teamCardsHtml}
+          ${lowBallProgressHtml}
+          ${standingsHtml}
+        ` : `
+          <h4 style="margin:16px 0 4px;">Live scoring</h4>
+          <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Enter scores one hole at a time for anyone in the bet — the only place scores get entered. Switch to Match scoreboard above to see how things stand.</p>
+          ${holeByHoleHtml}
+        `}
       </div>
     `;
   }
@@ -4001,6 +4255,27 @@
       };
     }
 
+    // Lets a player switch which tee they're playing today — e.g. to join
+    // whoever they're actually out with, rather than whatever they signed up
+    // with — without disturbing team assignments or anyone else's numbers.
+    // Just recomputes that one player's own courseHandicap/strokesOff for the
+    // new tee (same helper the swap above uses), in place on whichever team (or
+    // bench slot) they're already in.
+    document.querySelectorAll('[data-team-tee-player]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const pid = sel.getAttribute('data-team-tee-player');
+        const teeDate = sel.getAttribute('data-team-tee-date');
+        const teamsInfo = data.teams[teeDate];
+        if(!teamsInfo) return;
+        const slot = findTeamsInfoSlot(teamsInfo, pid);
+        if(!slot) return;
+        const current = slot.list[slot.index];
+        slot.list[slot.index] = recomputedForTeamSlot(teeDate, Object.assign({}, current, { tee: sel.value }));
+        await saveData();
+        render();
+      });
+    });
+
     const scoringDateSelect = document.getElementById('ts-scoring-date-select');
     if(scoringDateSelect){
       scoringDateSelect.onchange = () => {
@@ -4022,6 +4297,21 @@
       roundStakeInput.onchange = async () => {
         const val = parseFloat(roundStakeInput.value);
         await saveRoundSettings(scoringSelectedDate, { stakePerSeries: isNaN(val) || val < 0 ? 0 : val });
+        render();
+      };
+    }
+
+    // Game choice is saved as part of a regular full-data save rather than through
+    // saveRoundSettings' lock-protected partial merge — it's an admin setup choice
+    // made rarely (once, before scoring gets going), not something two scorekeepers
+    // race to change mid-round the way holes/stakes can be, so it doesn't need that
+    // endpoint's extra machinery.
+    const roundGameSelect = document.getElementById('ts-round-game');
+    if(roundGameSelect){
+      roundGameSelect.onchange = async () => {
+        const round = ensureRoundDefaults(scoringSelectedDate);
+        round.game = roundGameSelect.value === '1ball' ? '1ball' : '2ball';
+        await saveData();
         render();
       };
     }
@@ -4277,6 +4567,13 @@
       });
     });
 
+    document.querySelectorAll('[data-scoring-view]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        scoringViewMode = btn.getAttribute('data-scoring-view');
+        render();
+      });
+    });
+
     document.querySelectorAll('[data-duty-sort]').forEach(btn => {
       btn.addEventListener('click', () => {
         dutySort = btn.getAttribute('data-duty-sort');
@@ -4291,13 +4588,18 @@
       });
     });
 
-    const hbhTeamSelect = document.getElementById('ts-hbh-team-select');
-    if(hbhTeamSelect){
-      hbhTeamSelect.addEventListener('change', () => {
-        scoringTeamIndex = parseInt(hbhTeamSelect.value, 10) || 0;
+    document.querySelectorAll('[data-playing-with]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const pid = cb.getAttribute('data-playing-with');
+        if(cb.checked){
+          if(!myGroupIds.includes(pid)) myGroupIds.push(pid);
+        } else {
+          myGroupIds = myGroupIds.filter(id => id !== pid);
+        }
+        persistMyGroup();
         render();
       });
-    }
+    });
     const hbhPrevBtn = document.getElementById('ts-hbh-prev-hole');
     if(hbhPrevBtn){
       hbhPrevBtn.addEventListener('click', () => {
@@ -4332,6 +4634,25 @@
         const playerId = btn.getAttribute('data-score-player');
         const holeNum = btn.getAttribute('data-score-hole');
         await saveScore(dateKeyAttr, playerId, holeNum, next);
+        render();
+      });
+    });
+
+    document.querySelectorAll('.ts-accept-scores-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const dateKeyAttr = btn.getAttribute('data-accept-date');
+        const holeNum = btn.getAttribute('data-accept-hole');
+        const ids = btn.getAttribute('data-accept-ids').split(',').filter(Boolean);
+        const holeKey = String(holeNum);
+        const roundForAccept = ensureRoundDefaults(dateKeyAttr);
+        // Re-save each player's current value as a confirmed entry — this never
+        // changes what's on screen, it just stops treating it as a still-pending
+        // par default. Anyone with no score at all for this hole is skipped; there's
+        // nothing to confirm.
+        for(const id of ids){
+          const val = (roundForAccept.scores[id] || {})[holeKey];
+          if(typeof val === 'number') await saveScore(dateKeyAttr, id, holeNum, val);
+        }
         render();
       });
     });
