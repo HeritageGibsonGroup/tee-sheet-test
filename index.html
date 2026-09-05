@@ -2926,7 +2926,7 @@
             <div class="ts-team-row">
               <span class="ts-team-num" style="color:var(--rust);">Not in the bet</span>
               ${generatedTeams.notInBet.map(p => {
-                const hcNote = typeof p.courseHandicap === 'number' ? ` — HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''}` : '';
+                const teeLabel = p.tee ? `${esc(p.tee)} tee ` : ''; const hcNote = typeof p.courseHandicap === 'number' ? ` — ${teeLabel}HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''}` : '';
                 return `<span class="name-chip">${esc(p.name)} <span class="ts-team-so">(${esc(p.reason)}${hcNote})</span></span>`;
               }).join('')}
             </div>` : ''}
