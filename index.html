@@ -1616,9 +1616,8 @@
   // and whoever has the lowest course handicap among just the people playing that
   // day (not the whole roster) is who plays to scratch — matching real handicap play.
   function courseHandicapFor(player, tee){
-    if(!player || !tee || !player.courseHandicaps) return null;
-    const v = player.courseHandicaps[tee];
-    return typeof v === 'number' ? v : null;
+    if(!player || !tee) return null;
+    return computedCourseHandicap(player.handicapIndex, tee);    
   }
 
   // Standard USGA Course Handicap formula: Index × (Slope ÷ 113) + (Rating − Par),
