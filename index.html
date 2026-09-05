@@ -2920,7 +2920,7 @@
           ${generatedTeams.teams.map((team, i) => `
             <div class="ts-team-row">
               <span class="ts-team-num">Team ${i+1}</span>
-              ${team.map(p => `<span class="name-chip">${esc(p.name)}${typeof p.courseHandicap === 'number' ? ` <span class="ts-team-so">(HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''})</span>` : ''}</span>`).join('')}
+              ${team.map(p => {   const teeLabel = p.tee ? `${esc(p.tee)} tee ` : '';   const hcNote = typeof p.courseHandicap === 'number' ? ` <span class="ts-team-so">(${teeLabel}HC ${p.courseHandicap}${typeof p.strokesOff === 'number' ? `, Strokes off ${p.strokesOff}` : ''})</span>` : '';   return `<span class="name-chip">${esc(p.name)}${hcNote}</span>`; }).join('')}
             </div>`).join('')}
           ${generatedTeams.notInBet && generatedTeams.notInBet.length ? `
             <div class="ts-team-row">
