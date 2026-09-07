@@ -441,6 +441,15 @@
     background:var(--fairway); color:var(--ivory); font-family:'IBM Plex Mono',monospace;
     font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; position:sticky; top:0;
   }
+  /* Date column stays put while the rest of the grid scrolls horizontally —
+     both the header cell and every row's date cell need their own
+     position:sticky (a colspan'd "Club Closed" row still gets its own date
+     cell, so this covers those rows too), plus an opaque background so
+     scrolled-under player columns don't show through. The header's date
+     cell is both top-sticky (from thead th above) and left-sticky, so it
+     needs the higher z-index to stay above everything else in both axes. */
+  .ts-grid-date, .ts-grid-date-head{ position:sticky; left:0; z-index:1; }
+  .ts-grid-date-head{ z-index:3; }
   .ts-grid-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink); background:#FBFAF5; }
   .ts-grid-closed{ color:var(--rust); font-style:italic; text-align:center; }
   @media (max-width:640px){
@@ -603,7 +612,7 @@
   const GOLF_TOMORROW_EXTRA_CC = ['stevekirchhoff52@gmail.com', 'rtleene@aol.com'];
   const BOOKING_WINDOW_DAYS = 14; // club allows booking 2 weeks ahead
   const WEEKS_AHEAD = 52;
-  const VERSION_DATE = 'September 3, 2026'; // update this each time a change is promoted to live
+  const VERSION_DATE = 'September 7, 2026'; // update this each time a change is promoted to live
   const PLAY_DOWS = [1,3,5]; // Mon, Wed, Fri
   const HOLES_CYCLE = ['18','F9','B9'];
   const HOLES_LABEL = { '18': '18 holes', 'F9': 'Front 9', 'B9': 'Back 9' };
@@ -690,6 +699,23 @@
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ dateKey, signedUpCount, confirmedTeeTimes, capacity, standbyIds })
+      });
+    }catch(e){ /* best-effort */ }
+  }
+
+  // Fires when someone confirmed to play drops out on the actual day of play
+  // (tee times are already booked by then, so this is the "a foursome just
+  // lost a player, someone needs to know right now" case) — distinct from an
+  // ordinary advance drop-out, which just quietly opens the spot to standby
+  // and shows up in tomorrow's admin-only activity digest, not an
+  // immediate group-wide email.
+  async function notifyDayOfDropout(dateKey, playerName){
+    try{
+      const url = `${BACKEND_URL}?key=${encodeURIComponent(BACKEND_KEY)}&action=notify_dayof_dropout`;
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ dateKey, playerName })
       });
     }catch(e){ /* best-effort */ }
   }
@@ -1126,7 +1152,20 @@
   // standby player into a confirmed spot on the next render. No manual promotion needed.
   function capacityFor(key){
     const n = data.confirmedTeeTimes[key];
-    return (typeof n === 'number' && n > 0) ? n * PLAYERS_PER_TEE_TIME : null;
+    if(typeof n === 'number' && n > 0) return n * PLAYERS_PER_TEE_TIME;
+    // Nobody logged a confirmed count — once the booking day itself has come
+    // and gone, assume the duty person got what was needed rather than
+    // treating the date as still unresolved (in practice tee times always
+    // come through; what's usually missing is just remembering to log it in
+    // the app). Before the booking day arrives, capacity genuinely isn't
+    // decided yet, so this still returns null then.
+    const playDate = new Date(key + 'T00:00:00');
+    const bookDate = new Date(playDate); bookDate.setDate(bookDate.getDate() - BOOKING_WINDOW_DAYS);
+    const bookingDayArrived = daysBetween(new Date(), bookDate) <= 0;
+    if(!bookingDayArrived) return null;
+    const signedUpCount = (data.signups[key] || []).length;
+    if(signedUpCount === 0) return null;
+    return Math.min(MAX_TEE_TIMES, Math.ceil(signedUpCount / PLAYERS_PER_TEE_TIME)) * PLAYERS_PER_TEE_TIME;
   }
   function splitConfirmedStandby(entries, capacity){
     if(capacity == null) return { confirmed: entries, standby: [] };
@@ -1568,7 +1607,13 @@
         const dateLabel = `${DOW_NAMES[tmrDate.getDay()]} ${MON_NAMES[tmrDate.getMonth()]} ${tmrDate.getDate()}`;
         const nameLines = withEmail.map(({entry, p}) => {
           const holesNote = entry.holes !== '18' ? ` (${HOLES_LABEL[entry.holes]})` : '';
-          return `- ${p.name}${holesNote}`;
+          // Same tee/course-handicap resolution and display convention used
+          // everywhere else in the app (entry's own tee for this date,
+          // falling back to the player's default; "<Tee> tee, HC <n>").
+          const tee = entry.tee || p.defaultTee || null;
+          const ch = computedCourseHandicap(p.handicapIndex, tee);
+          const teeHcNote = tee ? ` — ${tee} tee${typeof ch === 'number' ? `, HC ${ch}` : ''}` : (typeof ch === 'number' ? ` — HC ${ch}` : '');
+          return `- ${p.name}${teeHcNote}${holesNote}`;
         }).join('\n');
         rows.push({
           cc: withEmail.map(x => x.p.email).concat(PRO_SHOP_EMAILS).concat(GOLF_TOMORROW_EXTRA_CC).join(','),
@@ -3056,7 +3101,7 @@
         <p class="ts-grid-disclaimer">For informational purposes only. Changes to the calendar cannot be made here.</p>
         <div class="ts-grid-wrap">
           <table class="ts-grid-table">
-            <thead><tr><th>Date</th>${headerCells}</tr></thead>
+            <thead><tr><th class="ts-grid-date-head">Date</th>${headerCells}</tr></thead>
             <tbody>${bodyRows}</tbody>
           </table>
         </div>`;
@@ -4929,11 +4974,19 @@
           logActivity('signup', { dateKey: key });
         } else if(!wantIn && idx !== -1){
           const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
+          const droppedPlayer = data.roster.find(p => p.id === meId);
+          const wasConfirmed = beforeConfirmedIds.includes(meId);
           list.splice(idx,1);
           logActivity('dropout', { dateKey: key });
           const afterConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
           if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
+          // A drop-out on the day of play itself is the one that actually
+          // strands a foursome — tee times are already booked, so unlike an
+          // advance drop-out (which just quietly opens the spot to standby),
+          // this goes out to the whole group right away instead of waiting
+          // for tomorrow's admin-only activity digest.
+          if(wasConfirmed && key === fmtDateKey(new Date()) && droppedPlayer) notifyDayOfDropout(key, droppedPlayer.name);
         } else {
           return;
         }
@@ -4979,10 +5032,17 @@
         const [key, pid] = btn.getAttribute('data-admin-remove').split('|');
         const capacity = capacityFor(key);
         const beforeConfirmedIds = splitConfirmedStandby(data.signups[key] || [], capacity).confirmed.map(x => x.id);
+        const removedPlayer = data.roster.find(p => p.id === pid);
+        const wasConfirmed = beforeConfirmedIds.includes(pid);
         data.signups[key] = (data.signups[key] || []).filter(x => x.id !== pid);
         const afterConfirmedIds = splitConfirmedStandby(data.signups[key], capacity).confirmed.map(x => x.id);
         const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
         if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
+        // Same day-of-play group alert as the self-service drop-out above —
+        // this admin-driven removal is the same "someone's out and the group
+        // needs to know now" situation (e.g. a player calls in to the admin
+        // instead of using the site themselves).
+        if(wasConfirmed && key === fmtDateKey(new Date()) && removedPlayer) notifyDayOfDropout(key, removedPlayer.name);
         await saveData();
         render();
       });
