@@ -840,7 +840,7 @@
     if(editing) return;
     let changed = false;
     if(unsavedScoreKeys.size){ await retryUnsavedScores(); changed = true; }
-    const viewingLive = isAdmin && activeSection === 'scoring';
+    const viewingLive = activeSection === 'scoring';
     if(viewingLive){
       try{
         const fetched = await fetchSharedData();
@@ -2749,6 +2749,22 @@
     const nameToId = {};
     data.roster.forEach(p => { nameToId[p.name.trim().toLowerCase()] = p.id; });
 
+    // Test and Live each generate their own player ids independently (they're
+    // random, timestamp-based, not shared) — so a snapshot exported from one
+    // and imported into the other can't just copy id-keyed fields like
+    // signups/duty as-is; a duty date carrying Live's id for Geoff, say,
+    // won't mean anything if Test happened to create Geoff with a different
+    // id. Building this incoming id->name map lets those fields be re-matched
+    // onto THIS app's own id for the same person, by name, below.
+    const incIdToName = {};
+    if(Array.isArray(incoming.roster)){
+      incoming.roster.forEach(entry => {
+        if(entry && typeof entry === 'object' && entry.id && entry.name){
+          incIdToName[entry.id] = entry.name;
+        }
+      });
+    }
+
     // Merge in any new roster names (never removes existing players). Reuse the id
     // from the incoming file when it has one — that's what makes it match the duty and
     // signup entries in the same file. Only generate a fresh id if none was provided.
@@ -2790,7 +2806,9 @@
       });
     }
 
-    // Merge in signups (id-based, from a full snapshot) — adds only, never clobbers an existing choice
+    // Merge in signups (id-based, from a full snapshot) — adds only, never clobbers an existing choice.
+    // Ids get re-matched by name first (see incIdToName above) so this lines up correctly
+    // even when the two apps generated different ids for the same player.
     let addedSignups = 0;
     if(incoming.signups && typeof incoming.signups === 'object'){
       Object.keys(incoming.signups).forEach(dateKey => {
@@ -2799,8 +2817,10 @@
         const list = data.signups[dateKey] || (data.signups[dateKey] = []);
         entries.forEach(e => {
           if(!e || !e.id) return;
-          if(list.some(x => x.id === e.id)) return;
-          list.push({ id: e.id, holes: HOLES_CYCLE.includes(e.holes) ? e.holes : '18' });
+          const incName = incIdToName[e.id];
+          const id = incName ? (nameToId[incName.trim().toLowerCase()] || e.id) : e.id;
+          if(list.some(x => x.id === id)) return;
+          list.push({ id, holes: HOLES_CYCLE.includes(e.holes) ? e.holes : '18' });
           addedSignups++;
         });
       });
@@ -2808,13 +2828,24 @@
 
     // Merge in duty assignments — id-based (from a full snapshot) or name-based (from a
     // duty-only spreadsheet export). Each date present in the update overwrites just that
-    // date; every other date's assignment is left untouched.
+    // date; every other date's assignment is left untouched. Same id-mismatch fix as
+    // signups above: re-match the incoming id to this app's id for that person by name
+    // first, and only fall back to using the incoming id as-is if we can't find a name
+    // for it at all (an older export, say) — so this still works either way.
     let updatedDuty = 0;
     const unmatchedNames = [];
     if(incoming.duty && typeof incoming.duty === 'object'){
       Object.keys(incoming.duty).forEach(dateKey => {
-        data.duty[dateKey] = incoming.duty[dateKey];
-        updatedDuty++;
+        const incId = incoming.duty[dateKey];
+        const incName = incIdToName[incId];
+        if(incName){
+          const matchedId = nameToId[incName.trim().toLowerCase()];
+          if(matchedId){ data.duty[dateKey] = matchedId; updatedDuty++; }
+          else { unmatchedNames.push(incName); }
+        } else {
+          data.duty[dateKey] = incId;
+          updatedDuty++;
+        }
       });
     }
     if(incoming.dutyByName && typeof incoming.dutyByName === 'object'){
@@ -3697,22 +3728,12 @@
   }
 
   // Scoring & Bets: hole-by-hole score entry for a date's generated teams,
-  // and the resulting series-by-series bet standings. Its own top-level tab
-  // (not tucked under Admin) so anyone can check in on the match, but
-  // entering or changing anything here still needs the admin PIN — any
-  // admin, including the scorekeeper for a given group once they're set up
-  // as an admin on the roster, can enter scores for any team.
+  // and the resulting series-by-series bet standings. Fully public, same as
+  // Handicaps — no PIN needed to view it or to enter scores, adjust round
+  // setup, or accept teams. (Reassigning players between teams still goes
+  // through swapPlayersTableHtml's own PIN-gated handler, same as it does on
+  // the Handicaps page — that's the one action here still protected.)
   function renderScoringPanel(el){
-    if(!isAdmin){
-      el.innerHTML = `
-        <div class="ts-roster-panel">
-          <div class="ts-locked-panel">
-            Entering scores needs the admin PIN.
-            <br><button id="ts-unlock-scoring">Enter admin PIN</button>
-          </div>
-        </div>`;
-      return;
-    }
 
     const teamDates = Object.keys(data.teams).sort();
     if(teamDates.length === 0){
@@ -4652,14 +4673,6 @@
           await showMessage('Teams generated', `Teams for ${MON_NAMES[d.getMonth()]} ${d.getDate()} are ready — check that date's card in Upcoming Dates.`);
         }
         render();
-      };
-    }
-
-    const unlockScoringBtn = document.getElementById('ts-unlock-scoring');
-    if(unlockScoringBtn){
-      unlockScoringBtn.onclick = async () => {
-        const ok = await requireAdmin();
-        if(ok) render();
       };
     }
 
