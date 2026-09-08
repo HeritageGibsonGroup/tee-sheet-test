@@ -901,6 +901,12 @@
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
   let scoringViewMode = 'setup'; // 'setup' | 'live' | 'season' — which part of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
+  // Which team's players Live Scoring's hole-by-hole view shows — 'auto'
+  // (default) means "whichever team the signed-in viewer is on, else
+  // everyone"; 'all' or a team index is an explicit override the viewer
+  // picked themselves. Resets to 'auto' on reload, so this is just a
+  // convenience for the current visit, not a saved preference.
+  let scoringTeamFilter = 'auto';
   // Real (non-silent) score saves that failed to reach the backend — a course's spotty
   // signal is exactly when this matters most, so instead of the old silent swallow,
   // these get a visible "not saved" marker and get retried automatically (on
@@ -1990,10 +1996,12 @@
     const result = computeTeamsForDate(key);
     if(!result) return null;
     data.teams[key] = result;
-    // A fresh (re)generation replaces whatever the admin may have already reviewed
-    // and accepted — require a new Accept Teams before Live Scoring shows this
-    // lineup.
-    ensureRoundDefaults(key).teamsAccepted = false;
+    // A fresh (re)generation hasn't been touched by anyone yet, so there's
+    // nothing pending to confirm — Live Scoring can show it immediately.
+    // Swapping a player afterward is what should require a deliberate
+    // "Accept teams after swapping players" click (see the team-assignment
+    // checkbox handler, which sets this back to false).
+    ensureRoundDefaults(key).teamsAccepted = true;
     await saveData();
     return key;
   }
@@ -2131,11 +2139,11 @@
     if(typeof data.rounds[dateKey].startHole !== 'number') data.rounds[dateKey].startHole = 1;
     if(typeof data.rounds[dateKey].stakePerSeries !== 'number') data.rounds[dateKey].stakePerSeries = 1;
     if(data.rounds[dateKey].game !== '1ball' && data.rounds[dateKey].game !== '2ball') data.rounds[dateKey].game = '2ball';
-    // Gates Live Scoring: names only show up there once the admin has reviewed the
-    // generated (or manually reassigned) teams on Set up & Bets and clicked Accept
-    // Teams. Regenerating teams or reassigning a player resets this back to false —
-    // see generateTeamsForNextPlayDay and the team-assignment checkbox handler —
-    // so a roster change always needs a fresh, deliberate re-accept.
+    // Gates Live Scoring: a freshly generated team set is accepted automatically
+    // (see generateTeamsForNextPlayDay), but manually swapping a player resets
+    // this back to false — see the team-assignment checkbox handler — so any
+    // swap needs a fresh, deliberate "Accept teams after swapping players"
+    // click before Live Scoring reflects it.
     if(typeof data.rounds[dateKey].teamsAccepted !== 'boolean') data.rounds[dateKey].teamsAccepted = false;
     return data.rounds[dateKey];
   }
@@ -3820,10 +3828,10 @@
 
     const acceptTeamsHtml = `
       <div class="ts-accept-teams-wrap" style="padding:14px 0 4px; text-align:center;">
-        <button type="button" class="ts-accept-scores-btn" id="ts-accept-teams-btn">Accept teams</button>
+        <button type="button" class="ts-accept-scores-btn" id="ts-accept-teams-btn"${round.teamsAccepted ? ' disabled' : ''}>Accept teams after swapping players</button>
         <p style="margin:8px 0 0; font-size:12px; color:#6b6a5e;">${round.teamsAccepted
-          ? '✓ Accepted — these are the names showing in Live Scoring.'
-          : 'Not yet accepted — Live Scoring won’t show any names until this is clicked.'}</p>
+          ? 'No pending swaps — Live Scoring is showing the current lineup.'
+          : 'A player was swapped — click above to confirm before Live Scoring reflects it.'}</p>
       </div>`;
 
     // Match scoreboard is read-only — a summary to glance at, not where scores get
@@ -3886,6 +3894,32 @@
     // anyone not on a team, so that's the only group Live Scoring ever shows.
     const allRoundPlayers = teamsInfo.teams.flat();
 
+    // With several teams playing at once, one team's scorer doesn't need (or
+    // want) every other team's players cluttering their hole-by-hole list —
+    // so this defaults to just the signed-in viewer's own team, and falls
+    // back to everyone when the viewer isn't identified, isn't on a team
+    // this date, there's only one team anyway, or they've explicitly picked
+    // a different view. This only narrows what's DISPLAYED (and what
+    // "Accept scores" applies to) — the silent par autofill above still runs
+    // for every player on every team regardless, so nobody's holes are left
+    // unset just because nobody happened to be viewing that team.
+    const myTeamIndex = meId ? teamsInfo.teams.findIndex(team => team.some(p => p.id === meId)) : -1;
+    let teamFilter = scoringTeamFilter;
+    if(teamFilter === 'auto') teamFilter = myTeamIndex !== -1 ? myTeamIndex : 'all';
+    if(typeof teamFilter === 'number' && !teamsInfo.teams[teamFilter]) teamFilter = 'all';
+    const showTeamFilter = teamsInfo.teams.length > 1;
+    const visibleRoundPlayers = (showTeamFilter && teamFilter !== 'all') ? (teamsInfo.teams[teamFilter] || []) : allRoundPlayers;
+
+    const teamFilterHtml = showTeamFilter ? `
+      <div style="margin-bottom:10px;">
+        <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Showing
+          <select id="ts-scoring-team-filter" style="margin-left:6px; font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+            <option value="all" ${teamFilter==='all'?'selected':''}>All teams</option>
+            ${teamsInfo.teams.map((t, ti) => `<option value="${ti}" ${teamFilter===ti?'selected':''}>Team ${ti+1}${ti===myTeamIndex?' (mine)':''}</option>`).join('')}
+          </select>
+        </label>
+      </div>` : '';
+
     // Default an unset score to par for this hole, so a group that made par can
     // just confirm and move on instead of typing every number — toggle it up or
     // down with the +/- buttons, or leave it alone to accept par. Never fires when
@@ -3919,9 +3953,11 @@
       const inputId = `ts-hbh-score-${p.id}`;
       // Hybrid tees (Red/Gold, Gold/White, White/Blue, Blue/Black) play a
       // different single tee hole by hole — informational only, so the
-      // scorer knows which tee box to actually hit from on this hole.
+      // scorer knows which tee box to actually hit from on this hole. Their
+      // hybrid combo (e.g. "Blue/White") is already shown right below in the
+      // tee dropdown, so this just names the one to actually hit from here.
       const hybridTeeHere = hybridTeeForHole(p.tee, hbhHole);
-      const hybridNote = hybridTeeHere ? ` <span class="ts-team-so">[${esc(p.tee)}] ${esc(hybridTeeHere)} tees</span>` : '';
+      const hybridNote = hybridTeeHere ? ` <span class="ts-team-so">Hit from ${esc(hybridTeeHere)} tees</span>` : '';
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--ivory-line);">
           <div>
@@ -3951,27 +3987,29 @@
     // actually made par never touches that field, so it'd sit there looking
     // "unconfirmed" forever. This button marks whatever's currently showing —
     // touched or still at par — as the real, confirmed score, without changing any
-    // numbers, for everyone on a team this hole.
-    const acceptScoresHtml = allRoundPlayers.length ? `
+    // numbers, for everyone currently visible (see visibleRoundPlayers above) this hole.
+    const acceptScoresLabel = (showTeamFilter && teamFilter !== 'all') ? `Accept Team ${teamFilter + 1}'s scores for hole ${hbhHole}` : `Accept everyone's scores for hole ${hbhHole}`;
+    const acceptScoresHtml = visibleRoundPlayers.length ? `
       <div style="padding:10px 0 4px; text-align:center;">
-        <button type="button" class="ts-accept-scores-btn" data-accept-date="${dateKey}" data-accept-hole="${hbhHole}" data-accept-ids="${allRoundPlayers.map(p => p.id).join(',')}">Accept everyone's scores for hole ${hbhHole}</button>
+        <button type="button" class="ts-accept-scores-btn" data-accept-date="${dateKey}" data-accept-hole="${hbhHole}" data-accept-ids="${visibleRoundPlayers.map(p => p.id).join(',')}">${acceptScoresLabel}</button>
       </div>` : '';
 
-    const hbhRowsHtml = allRoundPlayers.map(hbhRowHtml).join('') + acceptScoresHtml;
+    const hbhRowsHtml = visibleRoundPlayers.map(hbhRowHtml).join('') + acceptScoresHtml;
 
     const holeJumpOptionsHtml = flatHoles.map((h, idx) => {
       const p = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
       return `<option value="${idx}" ${idx===scoringHoleIndex?'selected':''}>Hole ${h}${p !== null ? ` (par ${p})` : ''}</option>`;
     }).join('');
 
-    // Nothing shows here until the admin has clicked Accept Teams on Set up &
-    // Bets — see round.teamsAccepted — so Live Scoring never displays a lineup
-    // that hasn't actually been reviewed yet.
+    // A freshly generated (never swapped) team set is accepted automatically —
+    // see generateTeamsForNextPlayDay — so this only blocks Live Scoring while
+    // a swap made since then is still waiting to be confirmed.
     const holeByHoleHtml = !round.teamsAccepted ? `
       <div class="ts-teams-block" style="margin-top:16px;">
-        <p class="ts-empty">Teams haven't been accepted for this round yet — go to Set up &amp; Bets, review the teams, and click Accept Teams.</p>
+        <p class="ts-empty">A player was swapped for this round — go to Set up &amp; Bets, review the teams, and click Accept teams after swapping players.</p>
       </div>` : `
       <div class="ts-teams-block" style="margin-top:16px;">
+        ${teamFilterHtml}
         <div style="display:flex; align-items:center; gap:8px;">
           <button id="ts-hbh-prev-hole" ${scoringHoleIndex===0?'disabled':''} style="padding:8px 12px; flex-shrink:0;">‹</button>
           <select id="ts-hbh-hole-select" style="flex:1; font-family:'Inter'; font-size:13px; padding:8px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
@@ -3980,7 +4018,7 @@
           <button id="ts-hbh-next-hole" ${scoringHoleIndex===flatHoles.length-1?'disabled':''} style="padding:8px 12px; flex-shrink:0;">›</button>
         </div>
         <div class="ts-team-num" style="margin-top:8px;">Hole ${hbhHole}${hbhPar !== null ? ` <span class="ts-team-so">(par ${hbhPar})</span>` : ''} <span class="ts-team-so">— Series ${hbhSeriesIndex+1}, ${scoringHoleIndex+1} of ${flatHoles.length}</span></div>
-        ${hbhRowsHtml || '<p class="ts-empty">No players on a team for this date.</p>'}
+        ${hbhRowsHtml || '<p class="ts-empty">No players to show for this view.</p>'}
       </div>`;
 
     const lowBallProgressHtml = lowBallProgress ? `
@@ -4727,8 +4765,9 @@
         } else {
           teamsInfo.notInBet.push(Object.assign({}, player, { reason: player.reason || 'Not selected for a team' }));
         }
-        // Any reassignment un-confirms previously accepted teams — Live Scoring
-        // needs a fresh Accept Teams before it'll show the new lineup.
+        // Any reassignment un-confirms the current teams — Live Scoring needs a
+        // fresh "Accept teams after swapping players" click before it'll show
+        // the new lineup.
         ensureRoundDefaults(dateKeyAttr).teamsAccepted = false;
         await saveData();
         render();
@@ -4769,6 +4808,10 @@
     if(scoringDateSelect){
       scoringDateSelect.onchange = () => {
         scoringSelectedDate = scoringDateSelect.value;
+        // A different round can have completely different teams, so an explicit
+        // team-filter choice from the last one shouldn't carry over — back to
+        // auto (viewer's own team, if they're on one this time).
+        scoringTeamFilter = 'auto';
         render();
       };
     }
@@ -5109,6 +5152,14 @@
     if(hbhHoleSelect){
       hbhHoleSelect.addEventListener('change', () => {
         scoringHoleIndex = parseInt(hbhHoleSelect.value, 10) || 0;
+        render();
+      });
+    }
+    const scoringTeamFilterSelect = document.getElementById('ts-scoring-team-filter');
+    if(scoringTeamFilterSelect){
+      scoringTeamFilterSelect.addEventListener('change', () => {
+        const val = scoringTeamFilterSelect.value;
+        scoringTeamFilter = val === 'all' ? 'all' : parseInt(val, 10);
         render();
       });
     }
