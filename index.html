@@ -263,6 +263,8 @@
   .ts-scorecard-table td.ts-scorecard-blank{ min-width:22px; height:22px; }
   .ts-scorecard-table td.ts-score-stroke{ background:#FBF3E4; }
   .ts-scorecard-table tr.ts-par-row th{ color:var(--ink); font-weight:700; border-top:1px solid var(--ivory-line); }
+  .ts-scorecard-table tr.ts-scorecard-hybrid-row td{ font-size:9.5px; color:#8b8a7c; font-style:italic; padding-top:0; border-bottom:1px dashed var(--ivory-line); }
+  .ts-scorecard-table tr.ts-scorecard-hybrid-row td:first-child{ font-family:'Inter',sans-serif; }
   .ts-scorecard-print-wrap{ margin-top:20px; padding-top:14px; border-top:1px dashed var(--ivory-line); }
   .ts-scorecard-block{ margin-top:16px; }
   @media print{
@@ -838,7 +840,7 @@
     if(editing) return;
     let changed = false;
     if(unsavedScoreKeys.size){ await retryUnsavedScores(); changed = true; }
-    const viewingLive = isAdmin && activeSection === 'admin' && adminSubTab === 'scoring';
+    const viewingLive = isAdmin && activeSection === 'scoring';
     if(viewingLive){
       try{
         const fetched = await fetchSharedData();
@@ -893,8 +895,8 @@
   let isGuestVerified = false;
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
-  let activeSection = 'schedule'; // 'schedule' | 'duty' | 'admin'
-  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps' | 'scoring'
+  let activeSection = 'schedule'; // 'schedule' | 'duty' | 'handicaps' | 'scoring' | 'admin'
+  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
   let scoringViewMode = 'setup'; // 'setup' | 'live' | 'season' — which part of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
@@ -1885,6 +1887,7 @@
     const parsKnown = holes.every(h => typeof data.holePars[String(h)] === 'number');
     const parTotal = parsKnown ? holes.reduce((sum, h) => sum + data.holePars[String(h)], 0) : null;
 
+    let anyHybrid = false;
     const teamTables = teamsInfo.teams.map((team, ti) => {
       if(!team.length) return '';
       const rows = team.map(p => {
@@ -1896,7 +1899,19 @@
         }).join('');
         const teeNote = p.tee ? ` <span class="ts-team-so">${esc(p.tee)}</span>` : '';
         const soNote = p.strokesOff ? ` <span class="ts-team-so">(S.O. ${p.strokesOff})</span>` : '';
-        return `<tr><td class="ts-score-name">${esc(p.name)}${teeNote}${soNote}</td>${cells}<td class="ts-scorecard-blank"></td></tr>`;
+        const mainRow = `<tr><td class="ts-score-name">${esc(p.name)}${teeNote}${soNote}</td>${cells}<td class="ts-scorecard-blank"></td></tr>`;
+        // Hybrid tees (Red/Gold, Gold/White, White/Blue, Blue/Black) play a
+        // different single tee hole by hole — a thin reference row right under
+        // that player's row, so the boxes above stay clear to write scores in.
+        let hybridRow = '';
+        if(hybridTeeKey(p.tee)){
+          anyHybrid = true;
+          hybridRow = `
+            <tr class="ts-scorecard-hybrid-row">
+              <td>Tee</td>${holes.map(h => `<td>${esc(HYBRID_TEE_ABBR[hybridTeeForHole(p.tee, h)] || '')}</td>`).join('')}<td></td>
+            </tr>`;
+        }
+        return mainRow + hybridRow;
       }).join('');
       return `
         <div class="ts-scorecard-block">
@@ -1915,13 +1930,16 @@
     }).join('');
 
     if(!teamTables) return '';
+    const hybridLegendHtml = anyHybrid
+      ? ` A "Tee" row under a hybrid-tee player (${Object.entries(HYBRID_TEE_ABBR).map(([full, abbr]) => `${abbr}=${full}`).join(', ')}) shows which tee they play that hole.`
+      : '';
     return `
       <div class="ts-scorecard-print-wrap">
         <div class="ts-section-title-row" style="margin:0 0 8px;">
           <span class="ts-import-row-label" style="margin:0;">Scorecards — ${esc(dateLabel)}</span>
           <button type="button" class="ts-print-btn" id="ts-print-scorecards">🖨️ Print scorecards</button>
         </div>
-        <p style="margin:0 0 10px; font-size:12.5px; color:#6b6a5e;">One card per team, ready to print and take out — the tinted box marks which holes each player gets a stroke on. Doesn't feed Live Scoring; scores still only count once entered there.</p>
+        <p style="margin:0 0 10px; font-size:12.5px; color:#6b6a5e;">One card per team, ready to print and take out — the tinted box marks which holes each player gets a stroke on.${hybridLegendHtml} Doesn't feed Live Scoring; scores still only count once entered there.</p>
         ${teamTables}
       </div>`;
   }
@@ -1987,6 +2005,34 @@
 
   function holeHandicapTableFor(tee){
     return isRedTee(tee) ? (data.holeHandicapsRed || {}) : (data.holeHandicaps || {});
+  }
+
+  // Hybrid tees play a different single tee on different holes — e.g. a
+  // "White/Blue" player tees off from Blue on some holes and White on
+  // others, per the club's own hybrid-tee chart (informational only; doesn't
+  // affect handicap or stroke-index math, which still goes by the player's
+  // one listed tee). Keyed by the tee name with spaces stripped and case
+  // ignored, so "White/Blue", "white / blue" etc. all match the same entry.
+  const HYBRID_TEE_HOLES = {
+    'red/gold':    ['Gold','Gold','Gold','Red','Gold','Red','Red','Gold','Red','Red','Gold','Gold','Red','Gold','Red','Gold','Gold','Red'],
+    'gold/white':  ['White','Gold','White','Gold','White','White','Gold','White','Gold','Gold','White','White','Gold','Gold','Gold','White','White','White'],
+    'white/blue':  ['Blue','White','Blue','White','Blue','Blue','White','Blue','White','White','Blue','Blue','White','White','White','Blue','Blue','White'],
+    'blue/black':  ['Black','Blue','Black','Blue','Black','Black','Blue','Black','Blue','Blue','Black','Black','Blue','Black','Blue','Black','Black','Blue'],
+  };
+  const HYBRID_TEE_ABBR = { Red: 'Rd', Gold: 'Gd', White: 'Wh', Blue: 'Bl', Black: 'Bk' };
+
+  function hybridTeeKey(tee){
+    if(typeof tee !== 'string') return null;
+    const norm = tee.trim().toLowerCase().replace(/\s+/g, '');
+    return HYBRID_TEE_HOLES[norm] ? norm : null;
+  }
+
+  // The actual tee a hybrid-tee player tees off from on one specific hole, or
+  // null if tee isn't a recognized hybrid tee.
+  function hybridTeeForHole(tee, holeNum){
+    const key = hybridTeeKey(tee);
+    if(!key) return null;
+    return HYBRID_TEE_HOLES[key][holeNum - 1] || null;
   }
 
   // True once all 18 holes have a rank entered and those ranks are exactly a
@@ -2973,6 +3019,9 @@
           <button class="ts-tab ${activeSection==='handicaps'?'active':''}" data-tab="handicaps">
             <span class="ts-tab-icon">📊</span><span class="ts-tab-label">Handicaps</span>
           </button>
+          <button class="ts-tab ${activeSection==='scoring'?'active':''}" data-tab="scoring">
+            <span class="ts-tab-icon">🏆</span><span class="ts-tab-label">Scoring &amp; Bets</span>
+          </button>
         </div>
 
         ${activeSection === 'admin' ? `
@@ -2982,12 +3031,12 @@
             <button class="ts-subtab ${adminSubTab==='data'?'active':''}" data-subtab="data">Data Import/Export &amp; Comparison</button>
             <button class="ts-subtab ${adminSubTab==='reminders'?'active':''}" data-subtab="reminders">Reminders</button>
             <button class="ts-subtab ${adminSubTab==='handicaps'?'active':''}" data-subtab="handicaps">Handicaps</button>
-            <button class="ts-subtab ${adminSubTab==='scoring'?'active':''}" data-subtab="scoring">Scoring &amp; Bets</button>
           </div>
           <div id="ts-admin-content"></div>
         ` : ''}
         ${activeSection === 'duty' ? `<div id="ts-duty-panel"></div>` : ''}
         ${activeSection === 'handicaps' ? `<div id="ts-handicaps-public-panel"></div>` : ''}
+        ${activeSection === 'scoring' ? `<div id="ts-scoring-panel"></div>` : ''}
         ${activeSection === 'schedule' ? `
           <div class="ts-section-title-row">
             <h2 class="ts-section-title">Upcoming dates <span>next ${WEEKS_AHEAD} weeks</span></h2>
@@ -3043,6 +3092,10 @@
       renderPublicHandicapsPanel(document.getElementById('ts-handicaps-public-panel'));
     }
 
+    if(activeSection === 'scoring'){
+      renderScoringPanel(document.getElementById('ts-scoring-panel'));
+    }
+
     if(activeSection === 'admin'){
       const contentEl = document.getElementById('ts-admin-content');
       if(adminSubTab === 'roster') renderRosterPanel(contentEl);
@@ -3050,7 +3103,6 @@
       else if(adminSubTab === 'data') renderDataPanel(contentEl);
       else if(adminSubTab === 'reminders') renderRemindersPanel(contentEl);
       else if(adminSubTab === 'handicaps') renderHandicapsPanel(contentEl);
-      else if(adminSubTab === 'scoring') renderScoringPanel(contentEl);
     }
 
     function renderDateCardHtml(d){
@@ -3571,7 +3623,7 @@
 
     // Teams for the next upcoming (non-closed) play date — lets players
     // generate or build their own teams for that round right from here,
-    // same underlying data/handlers as Admin > Scoring & Bets > Set up & Bets.
+    // same underlying data/handlers as the Scoring & Bets tab's Set up & Bets.
     const nextKey = nextPlayDateKey();
     const nextTeamsInfo = nextKey ? data.teams[nextKey] : null;
     let nextDateLabel = '';
@@ -3645,16 +3697,17 @@
   }
 
   // Scoring & Bets: hole-by-hole score entry for a date's generated teams,
-  // and the resulting series-by-series bet standings. Admin-only for now
-  // (kept under Admin until this is ready to hand to players directly), but
-  // any admin — including the scorekeeper for a given group, once they're
-  // set up as an admin on the roster — can enter scores for any team here.
+  // and the resulting series-by-series bet standings. Its own top-level tab
+  // (not tucked under Admin) so anyone can check in on the match, but
+  // entering or changing anything here still needs the admin PIN — any
+  // admin, including the scorekeeper for a given group once they're set up
+  // as an admin on the roster, can enter scores for any team.
   function renderScoringPanel(el){
     if(!isAdmin){
       el.innerHTML = `
         <div class="ts-roster-panel">
           <div class="ts-locked-panel">
-            Scoring &amp; bets are admin-only for now.
+            Entering scores needs the admin PIN.
             <br><button id="ts-unlock-scoring">Enter admin PIN</button>
           </div>
         </div>`;
@@ -3830,12 +3883,17 @@
       const displayVal = typeof v === 'number' ? v : '';
       const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, hbhHole, p.tee) : 0;
       const inputId = `ts-hbh-score-${p.id}`;
+      // Hybrid tees (Red/Gold, Gold/White, White/Blue, Blue/Black) play a
+      // different single tee hole by hole — informational only, so the
+      // scorer knows which tee box to actually hit from on this hole.
+      const hybridTeeHere = hybridTeeForHole(p.tee, hbhHole);
+      const hybridNote = hybridTeeHere ? ` <span class="ts-team-so">[${esc(p.tee)}] ${esc(hybridTeeHere)} tees</span>` : '';
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--ivory-line);">
           <div>
             <div style="font-weight:600; font-size:15px;">${esc(p.name)}</div>
             <div style="font-size:11.5px; color:#8b8a7c; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-              <span>${p.strokesOff ? `S.O. ${p.strokesOff}` : ''}${strokesHere > 0 ? ' · gets a stroke here' : ''}${isDefault ? ' · showing par, not yet entered' : ''}</span>
+              <span>${p.strokesOff ? `S.O. ${p.strokesOff}` : ''}${strokesHere > 0 ? ' · gets a stroke here' : ''}${isDefault ? ' · showing par, not yet entered' : ''}</span>${hybridNote}
               ${data.teeOptions.length ? `<select data-team-tee-player="${p.id}" data-team-tee-date="${dateKey}" title="Switch ${p.name.split(' ')[0]}'s tee for today only" style="font-family:'Inter',sans-serif; font-size:10.5px; padding:1px 3px; border-radius:4px; border:1px solid var(--ivory-line); color:#6b6a5e;">
                 ${data.teeOptions.map(tee => `<option value="${esc(tee)}" ${p.tee===tee?'selected':''}>${esc(tee)}</option>`).join('')}
               </select>` : ''}
