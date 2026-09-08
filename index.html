@@ -250,6 +250,24 @@
     background:var(--brass); pointer-events:none;
   }
   .ts-stroke-dot-lg{ width:10px; height:10px; top:7px; right:9px; }
+  /* Printable blank scorecards — one table per team, 18 holes straight across
+     with a Front 9 / Back 9 divider, meant to be printed and taken to the
+     course. Its own class (not .ts-score-table) since the column divider
+     falls after hole 9 here instead of after every 6-hole series. */
+  .ts-scorecard-table{ border-collapse:collapse; font-family:'IBM Plex Mono',monospace; width:100%; }
+  .ts-scorecard-table th, .ts-scorecard-table td{ text-align:center; padding:5px 3px; border-bottom:1px solid var(--ivory-line); }
+  .ts-scorecard-table thead th{ font-size:10px; font-weight:600; color:#8b8a7c; }
+  .ts-scorecard-table thead tr:first-child th{ font-size:9.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--fairway); padding-bottom:4px; }
+  .ts-scorecard-table td.ts-score-name, .ts-scorecard-table th:first-child{ text-align:left; padding-right:10px; white-space:nowrap; font-family:'Inter',sans-serif; font-size:12.5px; }
+  .ts-scorecard-table th:nth-child(11), .ts-scorecard-table td:nth-child(11){ border-left:2px solid var(--ivory-line); }
+  .ts-scorecard-table td.ts-scorecard-blank{ min-width:22px; height:22px; }
+  .ts-scorecard-table td.ts-score-stroke{ background:#FBF3E4; }
+  .ts-scorecard-table tr.ts-par-row th{ color:var(--ink); font-weight:700; border-top:1px solid var(--ivory-line); }
+  .ts-scorecard-print-wrap{ margin-top:20px; padding-top:14px; border-top:1px dashed var(--ivory-line); }
+  .ts-scorecard-block{ margin-top:16px; }
+  @media print{
+    .ts-scorecard-block{ break-inside:avoid; }
+  }
   /* A score still sitting at its silent par default (nobody has actually typed,
      stepped, or otherwise confirmed it yet) renders visibly different from a
      real entry, so it's obvious at a glance which holes still need a look. */
@@ -563,7 +581,8 @@
     .ts-whoami, .ts-pin-link, .ts-reminders, .ts-tabbar, .ts-footer-note,
     .ts-print-btn, .ts-toggle-wrap, .ts-holes-group, .ts-admin-add, .chip-remove,
     .ts-duty-sort, #ts-duty-filter, #ts-schedule-filter, .ts-swap-btn, .ts-swap-pending,
-    .ts-admin-pill, .ts-add-row, .ts-import-row, #ts-new-name, #ts-add-player, .ts-player-action-select {
+    .ts-admin-pill, .ts-add-row, .ts-import-row, #ts-new-name, #ts-add-player, .ts-player-action-select,
+    .ts-subtabbar, .ts-accept-teams-wrap {
       display:none !important;
     }
     .ts-header{ background:#fff !important; color:var(--ink) !important; padding:10px 0; }
@@ -851,7 +870,7 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holePars: {}, adminPin: null, guestPin: '3672', playerPins: {}, activityLog: [] };
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holeHandicapsRed: {"1":7,"2":17,"3":13,"4":3,"5":9,"6":1,"7":5,"8":15,"9":11,"10":8,"11":10,"12":16,"13":2,"14":4,"15":6,"16":14,"17":18,"18":12}, holePars: {}, adminPin: null, guestPin: '3672', playerPins: {}, activityLog: [] };
   // Set when the very first load couldn't reach the backend at all (network hiccup,
   // or the fetch timing out per FETCH_TIMEOUT_MS above) — distinct from a
   // successful load that happens to find an empty roster, so init() can show a
@@ -1007,6 +1026,10 @@
     if(!data.teams) data.teams = {};
     if(!data.rounds) data.rounds = {};
     if(!data.holeHandicaps) data.holeHandicaps = {};
+    // Seeded once, the first time this field ever loads, with Heritage's actual
+    // Red-tee stroke index (from the club's scorecard) — from then on this is
+    // just a normal saved value, edited the same as the standard table.
+    if(!data.holeHandicapsRed) data.holeHandicapsRed = {"1":7,"2":17,"3":13,"4":3,"5":9,"6":1,"7":5,"8":15,"9":11,"10":8,"11":10,"12":16,"13":2,"14":4,"15":6,"16":14,"17":18,"18":12};
     if(!data.holePars) data.holePars = {};
     if(!data.playerPins) data.playerPins = {};
     if(typeof data.adminPin === 'undefined') data.adminPin = null;
@@ -1847,6 +1870,62 @@
       </div>`;
   }
 
+  // Blank paper scorecards for a date's teams — one printable table per team,
+  // holes 1-18 across the top (Front 9 / Back 9, like an actual scorecard)
+  // with a Par row and a tinted cell marking exactly which holes each player
+  // gets a stroke on (using their own tee's stroke index — Red plays a
+  // different one). Meant to be printed and taken to the course; it's a
+  // read-only reference, not part of Live Scoring — nothing here is saved.
+  function scorecardsHtml(dateKey){
+    const teamsInfo = data.teams[dateKey];
+    if(!teamsInfo) return '';
+    const d = new Date(dateKey + 'T00:00:00');
+    const dateLabel = `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+    const holes = Array.from({ length: 18 }, (_, i) => i + 1);
+    const parsKnown = holes.every(h => typeof data.holePars[String(h)] === 'number');
+    const parTotal = parsKnown ? holes.reduce((sum, h) => sum + data.holePars[String(h)], 0) : null;
+
+    const teamTables = teamsInfo.teams.map((team, ti) => {
+      if(!team.length) return '';
+      const rows = team.map(p => {
+        const table = holeHandicapTableFor(p.tee);
+        const tableComplete = holeHandicapsComplete(table);
+        const cells = holes.map(h => {
+          const strokes = tableComplete ? strokesReceivedOnHole(p.strokesOff, h, p.tee) : 0;
+          return `<td class="ts-scorecard-blank${strokes > 0 ? ' ts-score-stroke' : ''}"${strokes > 0 ? ` title="${p.name.split(' ')[0]} gets ${strokes} stroke${strokes===1?'':'s'} here"` : ''}></td>`;
+        }).join('');
+        const teeNote = p.tee ? ` <span class="ts-team-so">${esc(p.tee)}</span>` : '';
+        const soNote = p.strokesOff ? ` <span class="ts-team-so">(S.O. ${p.strokesOff})</span>` : '';
+        return `<tr><td class="ts-score-name">${esc(p.name)}${teeNote}${soNote}</td>${cells}<td class="ts-scorecard-blank"></td></tr>`;
+      }).join('');
+      return `
+        <div class="ts-scorecard-block">
+          <div class="ts-team-num">Team ${ti + 1} — ${esc(dateLabel)}</div>
+          <div style="overflow-x:auto;">
+            <table class="ts-scorecard-table">
+              <thead>
+                <tr><th></th><th colspan="9">Front 9</th><th colspan="9">Back 9</th><th></th></tr>
+                <tr><th>Hole</th>${holes.map(h => `<th>${h}</th>`).join('')}<th>Total</th></tr>
+                <tr class="ts-par-row"><th>Par</th>${holes.map(h => `<th>${typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : ''}</th>`).join('')}<th>${parTotal !== null ? parTotal : ''}</th></tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }).join('');
+
+    if(!teamTables) return '';
+    return `
+      <div class="ts-scorecard-print-wrap">
+        <div class="ts-section-title-row" style="margin:0 0 8px;">
+          <span class="ts-import-row-label" style="margin:0;">Scorecards — ${esc(dateLabel)}</span>
+          <button type="button" class="ts-print-btn" id="ts-print-scorecards">🖨️ Print scorecards</button>
+        </div>
+        <p style="margin:0 0 10px; font-size:12.5px; color:#6b6a5e;">One card per team, ready to print and take out — the tinted box marks which holes each player gets a stroke on. Doesn't feed Live Scoring; scores still only count once entered there.</p>
+        ${teamTables}
+      </div>`;
+  }
+
   function confirmedTeeTimesCountFor(dateKey){
     const n = data.confirmedTeeTimes[dateKey];
     return (typeof n === 'number' && n > 0) ? n : null;
@@ -1898,10 +1977,23 @@
     return groups;
   }
 
+  // Red tees play a different course setup and have their own stroke-index
+  // order from the scorecard — everything else shares one table. Matched by
+  // name rather than a fixed list, so it keeps working whatever the admin
+  // has actually named that tee (Red, Reds, Red Tees, Ladies Red, ...).
+  function isRedTee(tee){
+    return typeof tee === 'string' && /red/i.test(tee);
+  }
+
+  function holeHandicapTableFor(tee){
+    return isRedTee(tee) ? (data.holeHandicapsRed || {}) : (data.holeHandicaps || {});
+  }
+
   // True once all 18 holes have a rank entered and those ranks are exactly a
   // permutation of 1..18 (each hole a distinct difficulty rank, 1 = hardest).
-  function holeHandicapsComplete(){
-    const hh = data.holeHandicaps || {};
+  // table defaults to the standard (non-Red) stroke index.
+  function holeHandicapsComplete(table){
+    const hh = table || data.holeHandicaps || {};
     const ranks = [];
     for(let h = 1; h <= 18; h++){
       const r = hh[String(h)];
@@ -1913,12 +2005,29 @@
     return true;
   }
 
+  function holeHandicapsCompleteRed(){
+    return holeHandicapsComplete(data.holeHandicapsRed);
+  }
+
+  // Whether exact hole-by-hole strokes can be used for this date's teams: the
+  // standard stroke index always has to be complete, and — only if someone on
+  // a team (or sitting out) is actually playing a Red tee — the Red stroke
+  // index has to be complete too. Lets rounds with no Red players keep using
+  // exact strokes even before the Red table's been filled in.
+  function holeHandicapsCompleteForTeams(teamsInfo){
+    if(!holeHandicapsComplete()) return false;
+    const everyone = teamsInfo ? teamsInfo.teams.flat().concat(teamsInfo.notInBet || []) : [];
+    const usesRed = everyone.some(p => isRedTee(p.tee));
+    return !usesRed || holeHandicapsCompleteRed();
+  }
+
   // How many strokes a player with this many strokes-off gets on one specific
   // hole, using the standard allocation: a stroke on every hole ranked 1..N
   // (rank 1 = hardest); if N > 18, every hole gets one stroke plus a second on
-  // the (N-18) hardest. Only meaningful once holeHandicapsComplete() is true.
-  function strokesReceivedOnHole(strokesOff, holeNum){
-    const rank = (data.holeHandicaps || {})[String(holeNum)];
+  // the (N-18) hardest. tee picks which stroke-index table to use (Red tees
+  // have their own). Only meaningful once that table is complete.
+  function strokesReceivedOnHole(strokesOff, holeNum, tee){
+    const rank = holeHandicapTableFor(tee)[String(holeNum)];
     if(typeof rank !== 'number') return 0;
     const so = typeof strokesOff === 'number' && strokesOff > 0 ? strokesOff : 0;
     const full = Math.floor(so / 18);
@@ -1973,7 +2082,7 @@
     for(const p of team){
       const v = (scores[p.id] || {})[String(holeNum)];
       if(typeof v !== 'number') return null;
-      nets.push(v - strokesReceivedOnHole(p.strokesOff, holeNum));
+      nets.push(v - strokesReceivedOnHole(p.strokesOff, holeNum, p.tee));
     }
     nets.sort((a, b) => a - b);
     return nets.slice(0, Math.min(K, nets.length)).reduce((s, x) => s + x, 0);
@@ -1993,7 +2102,7 @@
     const groups = seriesHoleGroups(round.startHole);
     const scores = round.scores || {};
     const stake = round.stakePerSeries;
-    const exact = holeHandicapsComplete();
+    const exact = holeHandicapsCompleteForTeams(teamsInfo);
     const game = round.game === '1ball' ? '1ball' : '2ball';
     const K = lowBallCountFor(game);
 
@@ -2047,7 +2156,7 @@
   function computeLowBallProgress(dateKey){
     const teamsInfo = data.teams[dateKey];
     const round = data.rounds[dateKey];
-    if(!teamsInfo || !round || !holeHandicapsComplete()) return null;
+    if(!teamsInfo || !round || !holeHandicapsCompleteForTeams(teamsInfo)) return null;
     const groups = seriesHoleGroups(round.startHole);
     const scores = round.scores || {};
     const K = lowBallCountFor(round.game);
@@ -2078,7 +2187,7 @@
   function computeLowBallHoleRunning(dateKey){
     const teamsInfo = data.teams[dateKey];
     const round = data.rounds[dateKey];
-    if(!teamsInfo || !round || !holeHandicapsComplete()) return null;
+    if(!teamsInfo || !round || !holeHandicapsCompleteForTeams(teamsInfo)) return null;
     const groups = seriesHoleGroups(round.startHole);
     const scores = round.scores || {};
     const K = lowBallCountFor(round.game);
@@ -2723,6 +2832,19 @@
       });
     }
 
+    // Red tees have their own stroke index — same shape/import rules as above.
+    let updatedHoleHandicapsRed = 0;
+    if(incoming.holeHandicapsRed && typeof incoming.holeHandicapsRed === 'object'){
+      Object.keys(incoming.holeHandicapsRed).forEach(h => {
+        const n = parseInt(h, 10);
+        const rank = incoming.holeHandicapsRed[h];
+        if(n >= 1 && n <= 18 && typeof rank === 'number' && rank >= 1 && rank <= 18){
+          data.holeHandicapsRed[String(n)] = rank;
+          updatedHoleHandicapsRed++;
+        }
+      });
+    }
+
     // Par per hole: display only, same course-wide/one-time-setup shape as hole
     // handicaps above.
     let updatedHolePars = 0;
@@ -2740,7 +2862,7 @@
     const removedGhosts = normalizeSignups();
     if(updatedHandicaps > 0) data.handicapUpdatedAt = Date.now();
     await saveData();
-    let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}, updated ${updatedHoleHandicaps} hole handicap${updatedHoleHandicaps===1?'':'s'}, and updated ${updatedHolePars} hole par${updatedHolePars===1?'':'s'}.`;
+    let msg = `Added ${addedPlayers} new player${addedPlayers===1?'':'s'}, updated ${updatedEmails} email${updatedEmails===1?'':'s'}, updated ${updatedHandicaps} handicap${updatedHandicaps===1?'':'s'}, ${addedSignups} new signup${addedSignups===1?'':'s'}, updated ${updatedDuty} booking-duty assignment${updatedDuty===1?'':'s'}, updated ${updatedHoleHandicaps} hole handicap${updatedHoleHandicaps===1?'':'s'}, updated ${updatedHoleHandicapsRed} Red tee hole handicap${updatedHoleHandicapsRed===1?'':'s'}, and updated ${updatedHolePars} hole par${updatedHolePars===1?'':'s'}.`;
     if(removedGhosts > 0) msg += ` Also cleaned up ${removedGhosts} stale signup${removedGhosts===1?'':'s'} left over from removed players.`;
     if(unmatchedNames.length){
       msg += ` Couldn't match: ${[...new Set(unmatchedNames)].join(', ')} — check they're spelled the same as in the roster.`;
@@ -3196,7 +3318,7 @@
 
   function testBannerHtml(){
     if(!IS_TEST_ENV) return '';
-    return `<div class="ts-test-banner">⚠ Test version — changes here don't affect the live app</div>`;
+    return `<div class="ts-test-banner">⚠ Test version — recent data needs to be uploaded. Changes here don't affect the live app.</div>`;
   }
 
   function renderRosterPanel(el){
@@ -3458,6 +3580,7 @@
       if(!isNaN(nd.getTime())) nextDateLabel = `${MON_NAMES[nd.getMonth()]} ${nd.getDate()}`;
     }
     const teamsSwapHtml = nextTeamsInfo ? swapPlayersTableHtml(nextKey, nextTeamsInfo) : '';
+    const scorecardsBlockHtml = nextTeamsInfo ? scorecardsHtml(nextKey) : '';
 
     const tableHeaderHtml = `
       <div class="ts-roster-row" style="border-bottom:2px solid var(--ivory-line); padding-bottom:8px; margin-bottom:4px;">
@@ -3517,6 +3640,7 @@
             ${teamsSwapHtml}
           ` : `<p class="ts-empty">No upcoming play date yet.</p>`}
         </div>
+        ${scorecardsBlockHtml}
       </div>`;
   }
 
@@ -3560,7 +3684,7 @@
     const lowBallProgress = computeLowBallProgress(dateKey);
     const lowBallHoleRunning = computeLowBallHoleRunning(dateKey);
     const gameLabel = round.game === '1ball' ? '1-ball' : '2-ball';
-    const exact = holeHandicapsComplete();
+    const exact = holeHandicapsCompleteForTeams(teamsInfo);
     const seasonStandings = computeSeasonStandings();
 
     const dateOptionsHtml = teamDates.slice().reverse().map(k => {
@@ -3603,8 +3727,12 @@
     // and how it's wired; shared with the public Handicaps page.
     const swapRowHtml = swapPlayersTableHtml(dateKey, teamsInfo);
 
+    // Printable scorecards — see scorecardsHtml; same one shared with the
+    // public Handicaps page's Teams section.
+    const scorecardsBlockHtml = scorecardsHtml(dateKey);
+
     const acceptTeamsHtml = `
-      <div style="padding:14px 0 4px; text-align:center;">
+      <div class="ts-accept-teams-wrap" style="padding:14px 0 4px; text-align:center;">
         <button type="button" class="ts-accept-scores-btn" id="ts-accept-teams-btn">Accept teams</button>
         <p style="margin:8px 0 0; font-size:12px; color:#6b6a5e;">${round.teamsAccepted
           ? '✓ Accepted — these are the names showing in Live Scoring.'
@@ -3622,7 +3750,7 @@
           const v = playerScores[String(h)];
           const isDefault = typeof v === 'number' && !playerConfirmed[String(h)];
           const isUnsaved = unsavedScoreKeys.has(scoreErrKey(dateKey, p.id, h));
-          const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, h) : 0;
+          const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, h, p.tee) : 0;
           const strokeTitle = strokesHere > 0 ? ` title="${p.name.split(' ')[0]} gets ${strokesHere} stroke${strokesHere===1?'':'s'} here"` : '';
           const cellTitle = isUnsaved ? ' title="Not saved yet — will retry automatically"' : (isDefault ? ' title="Showing par — not yet entered during the round"' : '');
           return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}"${strokeTitle}${cellTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${isDefault ? ' ts-score-input-default' : ''}${isUnsaved ? ' ts-score-unsaved' : ''}">${typeof v === 'number' ? v : '–'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}${isUnsaved ? '<span class="ts-unsaved-dot" title="Not saved yet"></span>' : ''}</span></td>`;
@@ -3700,7 +3828,7 @@
       // it. Showing it truly blank in that case (instead of quietly redrawing par)
       // is the whole point — an empty box means empty, not "still deciding."
       const displayVal = typeof v === 'number' ? v : '';
-      const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, hbhHole) : 0;
+      const strokesHere = exact ? strokesReceivedOnHole(p.strokesOff, hbhHole, p.tee) : 0;
       const inputId = `ts-hbh-score-${p.id}`;
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--ivory-line);">
@@ -3866,6 +3994,7 @@
           ${teamsDisplayHtml}
           ${swapRowHtml}
           ${acceptTeamsHtml}
+          ${scorecardsBlockHtml}
         ` : scoringViewMode === 'season' ? `
           <h4 style="margin:16px 0 4px;">Season standings</h4>
           ${seasonStandingsHtml}
@@ -3932,6 +4061,27 @@
           </div>`).join('')}
       </div>`;
 
+    // Red tees play a different stroke index than every other tee — its own
+    // table, kept separate so it doesn't have to match the one above.
+    const hhRedComplete = holeHandicapsCompleteRed();
+    const hhRedFilledCount = Array.from({ length: 18 }, (_, i) => i + 1).filter(h => typeof data.holeHandicapsRed[String(h)] === 'number').length;
+    let hhRedStatusHtml = '';
+    if(hhRedComplete){
+      hhRedStatusHtml = `<p style="margin:6px 0 0; color:var(--fairway); font-weight:600;">✓ All 18 set — exact strokes are used for Red-tee players too.</p>`;
+    } else if(hhRedFilledCount === 0){
+      hhRedStatusHtml = `<p style="margin:6px 0 0;">Not set yet — a round with any Red-tee player will fall back to an even split of strokes until this is complete.</p>`;
+    } else {
+      hhRedStatusHtml = `<div class="ts-warn-banner" style="border-radius:8px; margin-top:6px;"><b>${hhRedFilledCount} of 18 entered</b>, and/or the ranks entered aren't exactly 1–18 with no repeats — a round with any Red-tee player will keep falling back to the even split until this is complete and valid.</div>`;
+    }
+    const hhRedRowHtml = (start) => `
+      <div class="ts-hh-row">
+        ${Array.from({ length: 9 }, (_, i) => start + i).map(h => `
+          <div class="ts-hh-cell">
+            <label>Hole ${h}</label>
+            <input type="number" min="1" max="18" step="1" data-hole-handicap-red="${h}" value="${typeof data.holeHandicapsRed[String(h)] === 'number' ? data.holeHandicapsRed[String(h)] : ''}">
+          </div>`).join('')}
+      </div>`;
+
     // Par per hole — display only, shown as a reference row on the Scoring & Bets
     // score-entry grid. Doesn't feed into strokes/handicap math anywhere (that's all
     // driven by Course Handicap and the stroke-index ranks above), just makes it
@@ -3965,10 +4115,17 @@
         </div>
         <div class="ts-import-row">
           <span class="ts-import-row-label">Hole handicaps (stroke index)</span>
-          <p style="margin:0 0 10px;">Each hole's difficulty rank, 1 (hardest) to 18 (easiest), off your scorecard — this rarely changes and is normally the same regardless of tee. It's what lets Scoring &amp; Bets give a player with, say, 5 strokes off a stroke on exactly the 5 hardest holes instead of splitting strokes evenly.</p>
+          <p style="margin:0 0 10px;">Each hole's difficulty rank, 1 (hardest) to 18 (easiest), off your scorecard — this rarely changes. Used for every tee except Red (Red has its own table below). It's what lets Scoring &amp; Bets give a player with, say, 5 strokes off a stroke on exactly the 5 hardest holes instead of splitting strokes evenly.</p>
           ${hhRowHtml(1)}
           ${hhRowHtml(10)}
           ${hhStatusHtml}
+        </div>
+        <div class="ts-import-row">
+          <span class="ts-import-row-label">Hole handicaps (stroke index) — Red tees</span>
+          <p style="margin:0 0 10px;">Red tees play the holes in a different order of difficulty than every other tee, so they get their own stroke-index table here.</p>
+          ${hhRedRowHtml(1)}
+          ${hhRedRowHtml(10)}
+          ${hhRedStatusHtml}
         </div>
         <div class="ts-import-row">
           <span class="ts-import-row-label">Par per hole</span>
@@ -4285,7 +4442,7 @@
     if(exportBtn){
       exportBtn.onclick = async () => {
         if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
-        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps, holePars: data.holePars, handicapUpdatedAt: data.handicapUpdatedAt, handicapEffectiveDate: data.handicapEffectiveDate, _lastModified: data._lastModified };
+        const snapshot = { roster: data.roster, signups: data.signups, duty: data.duty, closures: data.closures, confirmedTeeTimes: data.confirmedTeeTimes, teeTimeSchedule: data.teeTimeSchedule, teeRatings: data.teeRatings, teeOptions: data.teeOptions, teams: data.teams, holeHandicaps: data.holeHandicaps, holeHandicapsRed: data.holeHandicapsRed, holePars: data.holePars, handicapUpdatedAt: data.handicapUpdatedAt, handicapEffectiveDate: data.handicapEffectiveDate, _lastModified: data._lastModified };
         await showExportModal('Export data snapshot', 'Copy this and save it somewhere safe, or paste it into the test app.', JSON.stringify(snapshot));
       };
     }
@@ -4380,7 +4537,7 @@
   }
 
   function wireEvents(){
-    ['ts-print-schedule', 'ts-print-duty', 'ts-print-roster'].forEach(id => {
+    ['ts-print-schedule', 'ts-print-duty', 'ts-print-roster', 'ts-print-scorecards'].forEach(id => {
       const btn = document.getElementById(id);
       if(btn){ btn.onclick = () => window.print(); }
     });
@@ -4672,6 +4829,20 @@
         if(val === null){ delete data.holeHandicaps[h]; }
         else if(isNaN(val) || val < 1 || val > 18){ await showMessage('Not valid', 'Hole handicap has to be a whole number from 1 to 18.'); render(); return; }
         else { data.holeHandicaps[h] = val; }
+        await saveData();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-hole-handicap-red]').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        if(!isAdmin) return;
+        const h = inp.getAttribute('data-hole-handicap-red');
+        const raw = inp.value.trim();
+        const val = raw === '' ? null : parseInt(raw, 10);
+        if(val === null){ delete data.holeHandicapsRed[h]; }
+        else if(isNaN(val) || val < 1 || val > 18){ await showMessage('Not valid', 'Hole handicap has to be a whole number from 1 to 18.'); render(); return; }
+        else { data.holeHandicapsRed[h] = val; }
         await saveData();
         render();
       });
