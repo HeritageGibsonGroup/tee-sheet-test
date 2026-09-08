@@ -289,6 +289,7 @@
     cursor:pointer; width:100%; max-width:360px;
   }
   .ts-accept-scores-btn:active{ background:var(--fairway-dark); }
+  .ts-accept-scores-btn:disabled{ background:#c7c4b6; color:#fff; cursor:not-allowed; }
   .ts-hh-row{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .ts-hh-cell{ display:flex; flex-direction:column; align-items:center; gap:2px; width:38px; }
   .ts-hh-cell label{ font-family:'IBM Plex Mono',monospace; font-size:10px; color:#8b8a7c; }
@@ -940,9 +941,10 @@
     return dates;
   }
 
-  // The date "Generate teams now" (and the Teams/Swap section on the public
-  // Handicaps page) act on — the soonest upcoming play date that isn't closed.
-  // Shared so both always agree on which date is "next."
+  // The date "Generate suggested teams now" and "Swap players between teams"
+  // (both on Scoring & Bets, Set up & Bets) act on — the soonest upcoming
+  // play date that isn't closed. Shared so everything agrees on which date
+  // is "next."
   function nextPlayDateKey(){
     const nextDate = buildSchedule().find(d => !data.closures[fmtDateKey(d)]);
     return nextDate ? fmtDateKey(nextDate) : null;
@@ -1827,17 +1829,16 @@
     };
   }
 
-  // Shared "Swap players between teams" grid — renders on the admin Scoring &
-  // Bets tab (Set up & Bets) and on the public Handicaps page's Teams section,
-  // so anyone can build a date's teams by hand; the [data-assign-player] change
-  // handler is what actually gates changes behind the admin PIN when it's
-  // someone not already unlocked. Every player falls into exactly one of Team
-  // 1 / Team 2 / Not in bet, checkbox-wise — see that handler for how a check
-  // or uncheck resolves to a move. Ranked low to high by course handicap (the
-  // better golfer first), not alphabetically; anyone with no known course
-  // handicap sorts to the bottom, alphabetically among themselves. `label`
-  // lets a call site customize the intro line; returns '' when there's
-  // nothing to show (no teams generated for this date yet).
+  // "Swap players between teams" grid — Scoring & Bets, Set up & Bets — so
+  // anyone can rearrange a date's teams by hand once they exist (creating
+  // them in the first place is Generate suggested teams now, above). Fully
+  // public, no PIN. Every player falls into exactly one of Team 1 / Team 2 /
+  // Not in bet, checkbox-wise — see the [data-assign-player] change handler
+  // for how a check or uncheck resolves to a move. Ranked low to high by
+  // course handicap (the better golfer first), not alphabetically; anyone
+  // with no known course handicap sorts to the bottom, alphabetically among
+  // themselves. `label` lets a call site customize the intro line; returns ''
+  // when there's nothing to show (no teams generated for this date yet).
   function swapPlayersTableHtml(dateKey, teamsInfo, label){
     const assignAllPlayers = [
       ...teamsInfo.teams.flatMap((team, ti) => team.map(p => ({ p, teamIndex: ti }))),
@@ -1949,6 +1950,31 @@
     return (typeof n === 'number' && n > 0) ? n : null;
   }
 
+  // "Generate suggested teams now" — the one control for creating a new date's
+  // teams at all (Swap players below only rearranges an existing set). Lives
+  // in Scoring & Bets, Set up & Bets. Greys itself out once the upcoming
+  // round already has teams, since from that point on Swap players is where
+  // changes belong — regenerating here would silently discard them.
+  function generateTeamsBlockHtml(){
+    const nextKey = nextPlayDateKey();
+    let nextDateLabel = '';
+    if(nextKey){
+      const nd = new Date(nextKey + 'T00:00:00');
+      if(!isNaN(nd.getTime())) nextDateLabel = `${MON_NAMES[nd.getMonth()]} ${nd.getDate()}`;
+    }
+    const alreadyGenerated = nextKey ? !!data.teams[nextKey] : false;
+    return `
+      <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+        <span class="ts-import-row-label">Generate teams${nextDateLabel ? ` — ${esc(nextDateLabel)}` : ''}</span>
+        ${nextKey ? `
+          <p style="margin:0 0 10px;">${alreadyGenerated
+            ? 'Teams have already been generated for this round — make any changes in Swap players below.'
+            : 'Auto-splits everyone signed up for the upcoming round into two teams by handicap. Fine-tune the result afterward in Swap players below.'}</p>
+          <button type="button" class="ts-accept-scores-btn" id="ts-generate-teams-btn"${alreadyGenerated ? ' disabled' : ''}>Generate suggested teams now</button>
+        ` : `<p class="ts-empty">No upcoming play date yet.</p>`}
+      </div>`;
+  }
+
   // confirmOverwrite, if given, is called (with the date key) when teams already
   // exist for the target date — e.g. from a manual swap made in Scoring & Bets —
   // so the caller can warn before that gets discarded. Returns the date key on
@@ -2011,20 +2037,23 @@
   // "White/Blue" player tees off from Blue on some holes and White on
   // others, per the club's own hybrid-tee chart (informational only; doesn't
   // affect handicap or stroke-index math, which still goes by the player's
-  // one listed tee). Keyed by the tee name with spaces stripped and case
-  // ignored, so "White/Blue", "white / blue" etc. all match the same entry.
+  // one listed tee). Keyed by the two tee names alphabetically sorted, spaces
+  // stripped and case ignored, so "White/Blue", "Blue/White", "blue / white"
+  // etc. all match the same entry regardless of which order it was typed in.
   const HYBRID_TEE_HOLES = {
-    'red/gold':    ['Gold','Gold','Gold','Red','Gold','Red','Red','Gold','Red','Red','Gold','Gold','Red','Gold','Red','Gold','Gold','Red'],
+    'gold/red':    ['Gold','Gold','Gold','Red','Gold','Red','Red','Gold','Red','Red','Gold','Gold','Red','Gold','Red','Gold','Gold','Red'],
     'gold/white':  ['White','Gold','White','Gold','White','White','Gold','White','Gold','Gold','White','White','Gold','Gold','Gold','White','White','White'],
-    'white/blue':  ['Blue','White','Blue','White','Blue','Blue','White','Blue','White','White','Blue','Blue','White','White','White','Blue','Blue','White'],
-    'blue/black':  ['Black','Blue','Black','Blue','Black','Black','Blue','Black','Blue','Blue','Black','Black','Blue','Black','Blue','Black','Black','Blue'],
+    'blue/white':  ['Blue','White','Blue','White','Blue','Blue','White','Blue','White','White','Blue','Blue','White','White','White','Blue','Blue','White'],
+    'black/blue':  ['Black','Blue','Black','Blue','Black','Black','Blue','Black','Blue','Blue','Black','Black','Blue','Black','Blue','Black','Black','Blue'],
   };
   const HYBRID_TEE_ABBR = { Red: 'Rd', Gold: 'Gd', White: 'Wh', Blue: 'Bl', Black: 'Bk' };
 
   function hybridTeeKey(tee){
     if(typeof tee !== 'string') return null;
-    const norm = tee.trim().toLowerCase().replace(/\s+/g, '');
-    return HYBRID_TEE_HOLES[norm] ? norm : null;
+    const parts = tee.split('/').map(s => s.trim().toLowerCase()).filter(Boolean);
+    if(parts.length !== 2) return null;
+    const canon = parts.slice().sort().join('/');
+    return HYBRID_TEE_HOLES[canon] ? canon : null;
   }
 
   // The actual tee a hybrid-tee player tees off from on one specific hole, or
@@ -3652,17 +3681,12 @@
       if(!isNaN(d.getTime())) effectiveDateLabel = `${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
     }
 
-    // Teams for the next upcoming (non-closed) play date — lets players
-    // generate or build their own teams for that round right from here,
-    // same underlying data/handlers as the Scoring & Bets tab's Set up & Bets.
+    // Printable scorecards for the next upcoming (non-closed) play date, once
+    // it has teams — generating and swapping teams now both live on the
+    // Scoring & Bets tab (Set up & Bets), so this is the one team-related
+    // thing that stays here too, as a quick reference/print without switching tabs.
     const nextKey = nextPlayDateKey();
     const nextTeamsInfo = nextKey ? data.teams[nextKey] : null;
-    let nextDateLabel = '';
-    if(nextKey){
-      const nd = new Date(nextKey + 'T00:00:00');
-      if(!isNaN(nd.getTime())) nextDateLabel = `${MON_NAMES[nd.getMonth()]} ${nd.getDate()}`;
-    }
-    const teamsSwapHtml = nextTeamsInfo ? swapPlayersTableHtml(nextKey, nextTeamsInfo) : '';
     const scorecardsBlockHtml = nextTeamsInfo ? scorecardsHtml(nextKey) : '';
 
     const tableHeaderHtml = `
@@ -3713,33 +3737,23 @@
             ${playerRows || '<p class="ts-empty">No players yet.</p>'}
           </div>
         </div>
-        <div class="ts-import-row">
-          <span class="ts-import-row-label">Teams${nextDateLabel ? ` — ${esc(nextDateLabel)}` : ''}</span>
-          ${nextKey ? `
-            <p style="margin:0 0 10px;">Click here to generate suggested teams, or click on the table below (Swap players) to create your own teams.</p>
-            <div style="margin-bottom:${teamsSwapHtml ? '14px' : '0'};">
-              <button type="button" class="ts-accept-scores-btn" id="ts-generate-teams-btn">Generate teams now</button>
-            </div>
-            ${teamsSwapHtml}
-          ` : `<p class="ts-empty">No upcoming play date yet.</p>`}
-        </div>
         ${scorecardsBlockHtml}
       </div>`;
   }
 
   // Scoring & Bets: hole-by-hole score entry for a date's generated teams,
-  // and the resulting series-by-series bet standings. Fully public, same as
-  // Handicaps — no PIN needed to view it or to enter scores, adjust round
-  // setup, or accept teams. (Reassigning players between teams still goes
-  // through swapPlayersTableHtml's own PIN-gated handler, same as it does on
-  // the Handicaps page — that's the one action here still protected.)
+  // and the resulting series-by-series bet standings. Fully public, no PIN
+  // for anything here — generating suggested teams, swapping players between
+  // teams, adjusting round setup, accepting teams, or entering scores.
   function renderScoringPanel(el){
 
     const teamDates = Object.keys(data.teams).sort();
     if(teamDates.length === 0){
       el.innerHTML = `
         <div class="ts-roster-panel">
-          <p class="ts-empty">No teams have been generated for any date yet — generate teams on the Handicaps tab first, then come back here to score that round.</p>
+          <h4 style="margin:0 0 4px;">Set up</h4>
+          ${generateTeamsBlockHtml()}
+          <p class="ts-empty" style="margin-top:14px;">Once teams are generated, come back here to review them, swap players, and start scoring.</p>
         </div>`;
       return;
     }
@@ -3797,12 +3811,11 @@
           </div>` : ''}
       </div>`;
 
-    // Swap players between teams — see swapPlayersTableHtml for what this does
-    // and how it's wired; shared with the public Handicaps page.
+    // Swap players between teams — see swapPlayersTableHtml for what this does.
     const swapRowHtml = swapPlayersTableHtml(dateKey, teamsInfo);
 
-    // Printable scorecards — see scorecardsHtml; same one shared with the
-    // public Handicaps page's Teams section.
+    // Printable scorecards — see scorecardsHtml; also shown for the upcoming
+    // round on the public Handicaps page as a quick reference/print there.
     const scorecardsBlockHtml = scorecardsHtml(dateKey);
 
     const acceptTeamsHtml = `
@@ -4040,7 +4053,8 @@
 
         ${scoringViewMode === 'setup' ? `
           <h4 style="margin:16px 0 4px;">Set up &amp; Bets</h4>
-          <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+          ${generateTeamsBlockHtml()}
+          <div class="ts-import-row">
             <span class="ts-import-row-label">Round setup — ${esc(dateLabel)}</span>
             <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-top:6px;">
               <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Starting hole
@@ -4653,24 +4667,19 @@
       };
     }
 
+    // No PIN needed, and no overwrite-confirm flow — the button itself is
+    // disabled (see generateTeamsBlockHtml) the moment teams exist for the
+    // upcoming round, so this only ever runs when there's genuinely nothing
+    // to discard yet.
     const generateTeamsBtn = document.getElementById('ts-generate-teams-btn');
     if(generateTeamsBtn){
       generateTeamsBtn.onclick = async () => {
-        if(!isAdmin){ const ok = await requireAdmin(); if(!ok) return; render(); return; }
-        const key = await generateTeamsForNextPlayDay(async (k) => {
-          const kd = new Date(k + 'T00:00:00');
-          return await askConfirm(
-            'Teams already exist',
-            `Teams for ${MON_NAMES[kd.getMonth()]} ${kd.getDate()} have already been generated — if you've swapped any players since, regenerating will discard that. Continue?`,
-            'Regenerate', 'Cancel'
-          );
-        });
-        if(key === 'cancelled') return;
+        const key = await generateTeamsForNextPlayDay();
         if(!key){
           await showMessage('Nothing to generate', 'No upcoming play day has any signups yet.');
         } else {
           const d = new Date(key + 'T00:00:00');
-          await showMessage('Teams generated', `Teams for ${MON_NAMES[d.getMonth()]} ${d.getDate()} are ready — check that date's card in Upcoming Dates.`);
+          await showMessage('Teams generated', `Teams for ${MON_NAMES[d.getMonth()]} ${d.getDate()} are ready — review them below and use Swap players to fine-tune.`);
         }
         render();
       };
@@ -4698,18 +4707,12 @@
     // treated the same as checking Not in bet, so the player always lands
     // somewhere rather than in limbo. Recomputes handicap/strokes fresh for
     // whichever side of the move is a team, same as the old two-player swap did.
-    // This table can render on the admin Scoring & Bets tab or the public
-    // Handicaps page (see swapPlayersTableHtml) — data-assign-date says which
-    // date's teams a given checkbox belongs to either way, and a non-admin
-    // clicking one from the public page is asked for the admin PIN first.
+    // This table can render on the Scoring & Bets tab or the public Handicaps
+    // page (see swapPlayersTableHtml) — data-assign-date says which date's
+    // teams a given checkbox belongs to either way. Fully public now, no PIN,
+    // same as the rest of Scoring & Bets.
     document.querySelectorAll('[data-assign-player]').forEach(cb => {
       cb.addEventListener('change', async () => {
-        // Same pattern as the other admin actions reachable from a public page
-        // (see e.g. the Add player / Export buttons above): authenticate and
-        // re-render, but don't also apply the check on this same pass — the box
-        // just goes back to its actual state, and checking it again (now
-        // unlocked) is what applies the move.
-        if(!isAdmin){ const ok = await requireAdmin(); if(ok) render(); return; }
         const dateKeyAttr = cb.getAttribute('data-assign-date');
         const pid = cb.getAttribute('data-assign-player');
         const targetTeam = parseInt(cb.getAttribute('data-assign-team'), 10);
@@ -5126,8 +5129,13 @@
       });
     });
 
+    // This class is shared with a couple of other buttons (Generate suggested
+    // teams, Accept teams) purely for their look — only an actual "Accept
+    // everyone's scores for hole N" button carries data-accept-ids, so this
+    // bails out for the others rather than mistaking them for one.
     document.querySelectorAll('.ts-accept-scores-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
+        if(!btn.hasAttribute('data-accept-ids')) return;
         const dateKeyAttr = btn.getAttribute('data-accept-date');
         const holeNum = btn.getAttribute('data-accept-hole');
         const ids = btn.getAttribute('data-accept-ids').split(',').filter(Boolean);
