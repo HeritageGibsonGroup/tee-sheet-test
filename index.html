@@ -1867,11 +1867,11 @@
               <span style="flex:1; min-width:120px; font-size:13px; font-weight:600;">${esc(p.name)}</span>
               ${Array.from({ length: numTeams }, (_, ti) => `
                 <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:#6b6a5e; font-weight:500;">
-                  <input type="checkbox" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="${ti}" ${teamIndex===ti?'checked':''}>
+                  <input type="radio" name="ts-assign-${dateKey}-${p.id}" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="${ti}" ${teamIndex===ti?'checked':''}>
                   Team ${ti+1}
                 </label>`).join('')}
               <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:#6b6a5e; font-weight:500;">
-                <input type="checkbox" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="-1" ${teamIndex===-1?'checked':''}>
+                <input type="radio" name="ts-assign-${dateKey}-${p.id}" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="-1" ${teamIndex===-1?'checked':''}>
                 Not in bet
               </label>
             </div>`).join('')}
@@ -3689,14 +3689,6 @@
       if(!isNaN(d.getTime())) effectiveDateLabel = `${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
     }
 
-    // Printable scorecards for the next upcoming (non-closed) play date, once
-    // it has teams — generating and swapping teams now both live on the
-    // Scoring & Bets tab (Set up & Bets), so this is the one team-related
-    // thing that stays here too, as a quick reference/print without switching tabs.
-    const nextKey = nextPlayDateKey();
-    const nextTeamsInfo = nextKey ? data.teams[nextKey] : null;
-    const scorecardsBlockHtml = nextTeamsInfo ? scorecardsHtml(nextKey) : '';
-
     const tableHeaderHtml = `
       <div class="ts-roster-row" style="border-bottom:2px solid var(--ivory-line); padding-bottom:8px; margin-bottom:4px;">
         <span style="flex:1; min-width:170px; font-size:12.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink);">Player</span>
@@ -3745,7 +3737,6 @@
             ${playerRows || '<p class="ts-empty">No players yet.</p>'}
           </div>
         </div>
-        ${scorecardsBlockHtml}
       </div>`;
   }
 
@@ -4736,19 +4727,16 @@
       return null;
     }
 
-    // Swap players between teams — each row's checkboxes (Team 1, Team 2, Not in
-    // bet) are mutually exclusive by construction (a fresh render only ever
-    // checks the one box matching a player's current spot), so a "checked" event
-    // always means "move this player here" — target -1 means Not in bet, target
-    // 0+ means that team index. An "unchecked" event means their only checked
-    // box was just unchecked (there's nowhere else it could have come from);
-    // treated the same as checking Not in bet, so the player always lands
-    // somewhere rather than in limbo. Recomputes handicap/strokes fresh for
-    // whichever side of the move is a team, same as the old two-player swap did.
-    // This table can render on the Scoring & Bets tab or the public Handicaps
-    // page (see swapPlayersTableHtml) — data-assign-date says which date's
-    // teams a given checkbox belongs to either way. Fully public now, no PIN,
-    // same as the rest of Scoring & Bets.
+    // Swap players between teams — each row's options (Team 1, Team 2, Not in
+    // bet) are actual radio buttons sharing one name per player/date, so the
+    // browser itself enforces "only one selected" and flips the visible
+    // selection instantly on click, with no wait for the save/render round
+    // trip below. A "change" event only ever fires on the newly-selected
+    // radio (never on the one it replaced), and a radio's checked is always
+    // true when its own change fires — target -1 means Not in bet, target 0+
+    // means that team index. Recomputes handicap/strokes fresh for whichever
+    // side of the move is a team, same as the old two-player swap did. Fully
+    // public, no PIN, same as the rest of Scoring & Bets.
     document.querySelectorAll('[data-assign-player]').forEach(cb => {
       cb.addEventListener('change', async () => {
         const dateKeyAttr = cb.getAttribute('data-assign-date');
