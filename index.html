@@ -11,6 +11,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
+  html{ scroll-behavior:smooth; }
   :root{
     --fairway:#1B4332;
     --fairway-dark:#122E22;
@@ -409,6 +410,21 @@
     display:inline-block; font-family:'Inter',sans-serif; color:var(--fairway); font-size:13px; font-weight:600; margin:0 0 6px;
   }
   .ts-import-row p{ font-size:12px; color:#8b8a7c; margin:6px 0 0; line-height:1.5; }
+  /* Course Information quick-jump nav — a row of plain #anchor links to the
+     sections further down that panel (see renderCourseInfoPanel). Each target
+     section carries scroll-margin-top via .ts-ci-section so the jump lands
+     just below this row instead of flush against the top of the screen. */
+  .ts-ci-jumpnav{
+    display:flex; flex-wrap:wrap; gap:6px 8px; margin-bottom:14px; padding-bottom:14px;
+    border-bottom:1px dashed var(--ivory-line);
+  }
+  .ts-ci-jumpnav a{
+    font-family:'Inter',sans-serif; font-size:12px; font-weight:600; color:var(--fairway);
+    background:var(--ivory); border:1px solid var(--ivory-line); border-radius:999px;
+    padding:5px 12px; text-decoration:none; white-space:nowrap;
+  }
+  .ts-ci-jumpnav a:hover{ border-color:var(--brass); color:var(--brass); }
+  .ts-ci-section{ scroll-margin-top:14px; }
   .ts-note{
     font-size:12px; color:#8b8a7c; margin-top:10px; line-height:1.5; border-top:1px dashed var(--ivory-line); padding-top:10px;
   }
@@ -3547,26 +3563,12 @@
     el.innerHTML = `
       <div class="ts-roster-panel">
         <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
-          <span class="ts-import-row-label">First tee times</span>
-          <p style="margin:0 0 10px;">Enter a change whenever the club's first tee time shifts — it stays in effect for every date afterward until you enter the next change. Used to work out arrival times for booking duty (2 hours before).</p>
-          ${Object.keys(data.teeTimeSchedule).sort().map(k => {
-            const d = new Date(k + 'T00:00:00');
-            const label = `${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-            return `<div class="ts-closure-row"><span class="ts-closure-date">Effective ${label}</span><span class="ts-closure-status">${esc(data.teeTimeSchedule[k])}</span><button data-remove-tee-time="${k}">Remove</button></div>`;
-          }).join('') || '<p class="ts-empty">No changes entered yet.</p>'}
-          <div class="ts-add-row" style="margin-top:10px;">
-            <input type="date" id="ts-new-tee-time-date">
-            <input type="text" placeholder="First tee time (e.g. 8:00 AM)" id="ts-new-tee-time-value">
-            <button id="ts-add-tee-time">Add change</button>
-          </div>
-        </div>
-        <div class="ts-import-row">
           <button id="ts-prepare-emails-btn">Prepare email reminders</button>
           <p>Generates up to two group emails (as a CSV) — one for everyone playing tomorrow, one for anyone on pro-shop duty tomorrow — each CC'ing the whole group. Doesn't send anything itself — pairs with a scheduled script on your computer.</p>
         </div>
         <div class="ts-import-row">
           <button id="ts-prepare-weekly-btn">Prepare weekly summary</button>
-          <p>Generates the Sunday summary email — this week's tee time duties, the next three weeks of signups, and open slots — CC'ing everyone with an email on file. Arrival time is worked out automatically from First tee times above.</p>
+          <p>Generates the Sunday summary email — this week's tee time duties, the next three weeks of signups, and open slots — CC'ing everyone with an email on file. Arrival time is worked out automatically from First tee times (Course Information).</p>
         </div>
       </div>
     `;
@@ -4233,32 +4235,71 @@
         ? `<p style="margin:6px 0 0;">Not set yet.</p>`
         : `<p style="margin:6px 0 0;">${parFilledCount} of 18 entered so far.</p>`;
 
+    // Quick-jump nav: this panel covers a lot of ground (closures and first tee
+    // times, which change through the season, plus four rarely-touched
+    // reference tables below), so a row of anchor links up top lets you skip
+    // straight to one instead of scrolling past everything else. Plain
+    // in-page #anchors — no JS needed — with scroll-margin-top on each section
+    // (see .ts-ci-section CSS) so the jump lands below this nav row instead of
+    // being flush against the top of the screen.
+    const jumpNavHtml = `
+      <div class="ts-ci-jumpnav">
+        <a href="#ts-ci-closures">Course closures</a>
+        <a href="#ts-ci-teetimes">First tee times</a>
+        <a href="#ts-ci-teeratings">Tee ratings</a>
+        <a href="#ts-ci-hh">Hole handicaps</a>
+        <a href="#ts-ci-hhred">Hole handicaps — Red</a>
+        <a href="#ts-ci-par">Par per hole</a>
+      </div>`;
+
     el.innerHTML = `
       <div class="ts-roster-panel">
-        <h4 style="margin:0 0 4px;">Course closures</h4>
-        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Mark a date closed for an outside event — players won't be able to sign up for it.</p>
-        ${closureRowsHtml || '<p class="ts-empty">No upcoming dates.</p>'}
+        ${jumpNavHtml}
 
-        <div class="ts-import-row">
+        <div class="ts-ci-section" id="ts-ci-closures">
+          <h4 style="margin:0 0 4px;">Course closures</h4>
+          <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Mark a date closed for an outside event — players won't be able to sign up for it.</p>
+          ${closureRowsHtml || '<p class="ts-empty">No upcoming dates.</p>'}
+        </div>
+
+        <div class="ts-import-row ts-ci-section" id="ts-ci-teetimes">
+          <span class="ts-import-row-label">First tee times</span>
+          <p style="margin:0 0 10px;">Enter a change whenever the club's first tee time shifts — it stays in effect for every date afterward until you enter the next change. Used to work out arrival times for booking duty (2 hours before).</p>
+          ${Object.keys(data.teeTimeSchedule).sort().map(k => {
+            const d = new Date(k + 'T00:00:00');
+            const label = `${MON_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+            return `<div class="ts-closure-row"><span class="ts-closure-date">Effective ${label}</span><span class="ts-closure-status">${esc(data.teeTimeSchedule[k])}</span><button data-remove-tee-time="${k}">Remove</button></div>`;
+          }).join('') || '<p class="ts-empty">No changes entered yet.</p>'}
+          <div class="ts-add-row" style="margin-top:10px;">
+            <input type="date" id="ts-new-tee-time-date">
+            <input type="text" placeholder="First tee time (e.g. 8:00 AM)" id="ts-new-tee-time-value">
+            <button id="ts-add-tee-time">Add change</button>
+          </div>
+        </div>
+
+        <h4 style="margin:22px 0 2px;">Course reference (rarely changes)</h4>
+        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Tee ratings, hole handicaps, and par — set these once and they should hold steady all season.</p>
+
+        <div class="ts-import-row ts-ci-section" id="ts-ci-teeratings">
           <span class="ts-import-row-label">Tee ratings</span>
           <p style="margin:0 0 10px;">Course rating and slope for each tee — these rarely change. Loaded from the last handicap update.</p>
           ${teeRows}
         </div>
-        <div class="ts-import-row">
+        <div class="ts-import-row ts-ci-section" id="ts-ci-hh">
           <span class="ts-import-row-label">Hole handicaps (stroke index)</span>
           <p style="margin:0 0 10px;">Each hole's difficulty rank, 1 (hardest) to 18 (easiest), off your scorecard — this rarely changes. Used for every tee except Red (Red has its own table below). It's what lets Scoring &amp; Bets give a player with, say, 5 strokes off a stroke on exactly the 5 hardest holes instead of splitting strokes evenly.</p>
           ${hhRowHtml(1)}
           ${hhRowHtml(10)}
           ${hhStatusHtml}
         </div>
-        <div class="ts-import-row">
+        <div class="ts-import-row ts-ci-section" id="ts-ci-hhred">
           <span class="ts-import-row-label">Hole handicaps (stroke index) — Red tees</span>
           <p style="margin:0 0 10px;">Red tees play the holes in a different order of difficulty than every other tee, so they get their own stroke-index table here.</p>
           ${hhRedRowHtml(1)}
           ${hhRedRowHtml(10)}
           ${hhRedStatusHtml}
         </div>
-        <div class="ts-import-row">
+        <div class="ts-import-row ts-ci-section" id="ts-ci-par">
           <span class="ts-import-row-label">Par per hole</span>
           <p style="margin:0 0 10px;">Display only — shown as a reference row on the Scoring &amp; Bets score-entry grid. Doesn't affect strokes or handicaps.</p>
           ${parRowHtml(1)}
