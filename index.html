@@ -2538,6 +2538,119 @@
       });
     });
 
+    // Teams per date — the generated Team 1 / Team 2 / Not in bet groupings for
+    // each round. Matched by player name like everything else above. Three shapes
+    // of difference can show up:
+    //  - teams exist for a date in one app but were never generated in the other
+    //    -> offer to copy the whole grouping over (handicaps/strokes recomputed
+    //    fresh from whichever roster receives them, same as a manual swap-in)
+    //  - teams exist on both sides, but one named player's slot (which team, or
+    //    Not in bet, or not part of the round at all) differs -> offer to move
+    //    just that player
+    // This never touches already-entered scores (kept separately, by player id),
+    // but reassigning a round's teams after scoring has started carries the same
+    // trade-off as using Swap players mid-round — it changes who's grouped with
+    // whom without changing what's already been scored.
+    function slotForId(teamsInfo, id){
+      for(let ti = 0; ti < teamsInfo.teams.length; ti++){
+        if(teamsInfo.teams[ti].some(p => p.id === id)) return { kind: 'team', teamIndex: ti };
+      }
+      if((teamsInfo.notInBet || []).some(p => p.id === id)) return { kind: 'notInBet' };
+      return null;
+    }
+    function slotLabel(slot){
+      if(!slot) return 'Not part of the round';
+      if(slot.kind === 'team') return `Team ${slot.teamIndex + 1}`;
+      return 'Not in bet';
+    }
+    const allTeamDates = new Set([...Object.keys(cur.teams || {}), ...Object.keys(inc.teams || {})]);
+    [...allTeamDates].sort().forEach(date => {
+      const curTeamsInfo = cur.teams[date];
+      const incTeamsInfo = inc.teams[date];
+
+      if(curTeamsInfo && !incTeamsInfo){
+        diffs.push({
+          id: `teams-onlyhere-${date}`,
+          category: 'Teams',
+          label: `Teams for ${date} (generated in ${HERE_ENV_LC} only)`,
+          hereLabel: `Generated in ${HERE_ENV_CAP} only — keep`,
+          pastedLabel: `Not generated in ${PASTED_ENV_CAP} — remove from ${HERE_ENV_CAP}`,
+          apply: (d) => { delete d.teams[date]; }
+        });
+        return;
+      }
+      if(incTeamsInfo && !curTeamsInfo){
+        diffs.push({
+          id: `teams-onlypasted-${date}`,
+          category: 'Teams',
+          label: `Teams for ${date} (generated in ${PASTED_ENV_LC} only)`,
+          hereLabel: `Not generated in ${HERE_ENV_CAP} — leave it out`,
+          pastedLabel: `Generated in ${PASTED_ENV_CAP} only — copy teams to ${HERE_ENV_CAP}`,
+          apply: (d) => {
+            const numTeams = incTeamsInfo.teams.length;
+            const newTeams = Array.from({ length: numTeams }, () => []);
+            incTeamsInfo.teams.forEach((team, ti) => {
+              team.forEach(p => {
+                const player = findHereByName(p.name);
+                if(player) newTeams[ti].push(recomputedForTeamSlot(date, player));
+              });
+            });
+            const newNotInBet = [];
+            (incTeamsInfo.notInBet || []).forEach(p => {
+              const player = findHereByName(p.name);
+              if(player) newNotInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: p.reason || 'Not selected for a team' }));
+            });
+            d.teams[date] = { teams: newTeams, notInBet: newNotInBet, generatedAt: new Date().toISOString() };
+            if(d.rounds && d.rounds[date]) d.rounds[date].teamsAccepted = false;
+          }
+        });
+        return;
+      }
+
+      // Both sides have teams for this date — compare player-by-player assignment.
+      const curByName = {};
+      curTeamsInfo.teams.forEach((team, ti) => team.forEach(p => { curByName[p.name] = { kind: 'team', teamIndex: ti }; }));
+      (curTeamsInfo.notInBet || []).forEach(p => { curByName[p.name] = { kind: 'notInBet' }; });
+      const incByName = {};
+      incTeamsInfo.teams.forEach((team, ti) => team.forEach(p => { incByName[p.name] = { kind: 'team', teamIndex: ti }; }));
+      (incTeamsInfo.notInBet || []).forEach(p => { incByName[p.name] = { kind: 'notInBet' }; });
+
+      const allNames = new Set([...Object.keys(curByName), ...Object.keys(incByName)]);
+      [...allNames].sort().forEach(name => {
+        const curSlot = curByName[name] || null;
+        const incSlot = incByName[name] || null;
+        const same = curSlot && incSlot && curSlot.kind === incSlot.kind && curSlot.teamIndex === incSlot.teamIndex;
+        if(same) return;
+        diffs.push({
+          id: `teams-assign-${date}-${name}`,
+          category: 'Teams',
+          label: `${name} — ${date} team assignment`,
+          hereLabel: `${slotLabel(curSlot)} (${HERE_ENV_CAP})`,
+          pastedLabel: `${slotLabel(incSlot)} (${PASTED_ENV_CAP})`,
+          apply: (d) => {
+            const teamsInfo = d.teams[date];
+            if(!teamsInfo) return;
+            const player = findHereByName(name);
+            if(!player) return;
+            const slot = slotForId(teamsInfo, player.id);
+            if(slot){
+              const list = slot.kind === 'team' ? teamsInfo.teams[slot.teamIndex] : teamsInfo.notInBet;
+              const idx = list.findIndex(p => p.id === player.id);
+              if(idx !== -1) list.splice(idx, 1);
+            }
+            if(incSlot && incSlot.kind === 'team' && teamsInfo.teams[incSlot.teamIndex]){
+              teamsInfo.teams[incSlot.teamIndex].push(recomputedForTeamSlot(date, player));
+            } else if(incSlot && incSlot.kind === 'notInBet'){
+              teamsInfo.notInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: 'Not selected for a team' }));
+            }
+            // incSlot null means the pasted side doesn't have this player in the
+            // round's teams at all (e.g. not signed up there) — leave them out.
+            if(d.rounds && d.rounds[date]) d.rounds[date].teamsAccepted = false;
+          }
+        });
+      });
+    });
+
     return diffs;
   }
 
