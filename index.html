@@ -581,6 +581,12 @@
     border:1px solid var(--ivory-line); background:#fff; color:#6b6a5e; cursor:pointer;
   }
   .ts-reconcile-choice.selected{ background:var(--fairway); color:var(--ivory); border-color:var(--fairway); font-weight:600; }
+  .ts-reconcile-bulk{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+  .ts-reconcile-bulk button{
+    font-family:'Inter',sans-serif; font-size:12px; font-weight:600; padding:6px 12px; border-radius:7px;
+    cursor:pointer; border:1px solid var(--ivory-line); background:var(--ivory); color:var(--ink);
+  }
+  .ts-reconcile-bulk button:hover{ border-color:var(--brass); color:var(--brass); }
   .ts-modal-box textarea{
     width:100%; height:140px; font-family:'IBM Plex Mono',monospace; font-size:11px; padding:9px 11px;
     border-radius:7px; border:1px solid var(--ivory-line); margin-bottom:6px; resize:vertical; color:var(--ink);
@@ -2706,6 +2712,10 @@
             <h4>Reconcile differences</h4>
             <p>For each item, pick which version to keep. Nothing changes until you click Apply.</p>
             ${recencyHtml}
+            <div class="ts-reconcile-bulk">
+              <button type="button" id="ts-reconcile-all-pasted">Use ${esc(PASTED_ENV_CAP)} for everything below</button>
+              <button type="button" id="ts-reconcile-all-here">Use ${esc(HERE_ENV_CAP)} for everything below</button>
+            </div>
             <div class="ts-preview-scroll" id="ts-preview-scroll-inner">${rowsHtml()}</div>
             <div class="ts-modal-actions">
               <button class="ts-modal-cancel" id="ts-modal-cancel">Cancel</button>
@@ -2714,6 +2724,17 @@
           </div>
         </div>`;
       wireRows();
+
+      // Bulk-select just fills in the same per-row choices a person would've
+      // clicked one at a time — still nothing applied until Apply is clicked,
+      // and any row can still be flipped back individually afterward.
+      function selectAll(choice){
+        diffs.forEach(d => { selections[d.id] = choice; });
+        document.getElementById('ts-preview-scroll-inner').innerHTML = rowsHtml();
+        wireRows();
+      }
+      document.getElementById('ts-reconcile-all-pasted').onclick = () => selectAll('pasted');
+      document.getElementById('ts-reconcile-all-here').onclick = () => selectAll('here');
 
       const cleanup = (val) => { modalRoot.innerHTML = ''; resolve(val); };
       document.getElementById('ts-modal-cancel').onclick = () => cleanup(false);
