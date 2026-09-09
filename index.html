@@ -640,6 +640,16 @@
   const ADMIN_GATE_KEY = IS_LIVE_ENV ? 'golf-league-admin-gate-players' : 'golf-league-admin-gate-players-TEST';
   const VERIFIED_KEY = IS_LIVE_ENV ? 'golf-league-verified-players' : 'golf-league-verified-players-TEST';
   const GUEST_UNLOCK_KEY = IS_LIVE_ENV ? 'golf-league-guest-unlocked' : 'golf-league-guest-unlocked-TEST';
+  // Data Import/Export & Comparison always deals with exactly two sides — this
+  // app, and a snapshot pasted in from "the other one" — so these name which
+  // is which in plain "test"/"live" terms instead of the generic "here"/
+  // "pasted" the code uses internally, so the reconcile screen tells you
+  // directly which environment each option would come from without having to
+  // remember which app you're currently looking at.
+  const HERE_ENV_LC = IS_LIVE_ENV ? 'live' : 'test';
+  const PASTED_ENV_LC = IS_LIVE_ENV ? 'test' : 'live';
+  const HERE_ENV_CAP = IS_LIVE_ENV ? 'Live' : 'Test';
+  const PASTED_ENV_CAP = IS_LIVE_ENV ? 'Test' : 'Live';
   const PLAYERS_PER_TEE_TIME = 4;
   // The club never gives us more than 3 tee times, so pre-confirmation
   // estimates should never assume a 4th one is possible.
@@ -2373,7 +2383,7 @@
       diffs.push({
         id: 'roster-add-' + name,
         category: 'League roster',
-        label: `${name} is in the pasted data but not here`,
+        label: `${name} is in ${PASTED_ENV_LC} but not ${HERE_ENV_LC}`,
         hereLabel: 'Leave out',
         pastedLabel: `Add "${name}"${email ? ' (' + email + ')' : ''}`,
         apply: (d) => {
@@ -2392,7 +2402,7 @@
       diffs.push({
         id: 'roster-remove-' + p.id,
         category: 'League roster',
-        label: `${p.name} is here but not in the pasted data`,
+        label: `${p.name} is in ${HERE_ENV_LC} but not ${PASTED_ENV_LC}`,
         hereLabel: `Keep "${p.name}"`,
         pastedLabel: `Remove "${p.name}"`,
         apply: (d) => { d.roster = d.roster.filter(x => x.id !== p.id); }
@@ -2409,8 +2419,8 @@
         id: 'roster-email-' + p.id,
         category: 'League roster',
         label: `${p.name}'s email differs`,
-        hereLabel: `Keep "${a || '(none)'}"`,
-        pastedLabel: `Use "${b || '(none)'}"`,
+        hereLabel: `Keep "${a || '(none)'}" (${HERE_ENV_CAP})`,
+        pastedLabel: `Use "${b || '(none)'}" (${PASTED_ENV_CAP})`,
         apply: (d) => {
           const player = d.roster.find(x => x.id === p.id);
           if(player){ if(b) player.email = b; else delete player.email; }
@@ -2431,7 +2441,7 @@
         diffs.push({
           id: `signup-add-${date}-${name}`,
           category: 'Signups',
-          label: `${name} — ${date} (signed up in pasted data)`,
+          label: `${name} — ${date} (signed up in ${PASTED_ENV_LC} only)`,
           hereLabel: 'Not signed up',
           pastedLabel: `Add to ${date}`,
           apply: (d) => {
@@ -2450,7 +2460,7 @@
         diffs.push({
           id: `signup-remove-${date}-${name}`,
           category: 'Signups',
-          label: `${name} — ${date} (signed up here only)`,
+          label: `${name} — ${date} (signed up in ${HERE_ENV_LC} only)`,
           hereLabel: `Keep signed up`,
           pastedLabel: `Remove from ${date}`,
           apply: (d) => {
@@ -2470,8 +2480,8 @@
         id: `duty-${date}`,
         category: 'Booking duty',
         label: `Duty for ${date}`,
-        hereLabel: curName || 'Unassigned',
-        pastedLabel: incName || 'Unassigned',
+        hereLabel: `${curName || 'Unassigned'} (${HERE_ENV_CAP})`,
+        pastedLabel: `${incName || 'Unassigned'} (${PASTED_ENV_CAP})`,
         apply: (d) => {
           if(incName){
             const player = findHereByName(incName);
@@ -2492,8 +2502,8 @@
         id: `closure-${date}`,
         category: 'Course closures',
         label: `Closure status for ${date}`,
-        hereLabel: a ? 'Closed' + (a.trim() ? ' — ' + a : '') : 'Open',
-        pastedLabel: b ? 'Closed' + (b.trim() ? ' — ' + b : '') : 'Open',
+        hereLabel: `${a ? 'Closed' + (a.trim() ? ' — ' + a : '') : 'Open'} (${HERE_ENV_CAP})`,
+        pastedLabel: `${b ? 'Closed' + (b.trim() ? ' — ' + b : '') : 'Open'} (${PASTED_ENV_CAP})`,
         apply: (d) => { if(b){ d.closures[date] = b; } else { delete d.closures[date]; } }
       });
     });
@@ -2507,8 +2517,8 @@
         id: `confirmed-${date}`,
         category: 'Confirmed tee times',
         label: `Confirmed tee times for ${date}`,
-        hereLabel: a ? String(a) : 'Not set',
-        pastedLabel: b ? String(b) : 'Not set',
+        hereLabel: `${a ? String(a) : 'Not set'} (${HERE_ENV_CAP})`,
+        pastedLabel: `${b ? String(b) : 'Not set'} (${PASTED_ENV_CAP})`,
         apply: (d) => { if(b){ d.confirmedTeeTimes[date] = b; } else { delete d.confirmedTeeTimes[date]; } }
       });
     });
@@ -2522,8 +2532,8 @@
         id: `teetime-${date}`,
         category: 'First tee times',
         label: `Effective ${date}`,
-        hereLabel: a || 'Not set',
-        pastedLabel: b || 'Not set',
+        hereLabel: `${a || 'Not set'} (${HERE_ENV_CAP})`,
+        pastedLabel: `${b || 'Not set'} (${PASTED_ENV_CAP})`,
         apply: (d) => { if(b){ d.teeTimeSchedule[date] = b; } else { delete d.teeTimeSchedule[date]; } }
       });
     });
@@ -2545,8 +2555,8 @@
       const pastedTs = meta && meta.pastedModified;
       const recencyHtml = (hereTs || pastedTs) ? `
         <div class="ts-note" style="margin:0 0 10px;">
-          ${hereTs ? `This app last saved: ${fmtWhen(hereTs)}${(hereTs && pastedTs && hereTs > pastedTs) ? ' — more recent' : ''}` : 'This app: no save time on record'}<br>
-          ${pastedTs ? `Pasted data last saved: ${fmtWhen(pastedTs)}${(hereTs && pastedTs && pastedTs > hereTs) ? ' — more recent' : ''}` : 'Pasted data: no save time on record (exported before this was added)'}
+          ${hereTs ? `${HERE_ENV_CAP} last saved: ${fmtWhen(hereTs)}${(hereTs && pastedTs && hereTs > pastedTs) ? ' — more recent' : ''}` : `${HERE_ENV_CAP}: no save time on record`}<br>
+          ${pastedTs ? `${PASTED_ENV_CAP} last saved: ${fmtWhen(pastedTs)}${(hereTs && pastedTs && pastedTs > hereTs) ? ' — more recent' : ''}` : `${PASTED_ENV_CAP}: no save time on record (exported before this was added)`}
         </div>` : '';
       const selections = {};
       diffs.forEach(d => { selections[d.id] = 'here'; });
@@ -2606,7 +2616,7 @@
   }
 
   async function compareWithPasted(){
-    const pasted = await askLongText('Compare with other app', 'Paste a snapshot exported from the other app (test or live) — you\'ll get to choose which version to keep for each difference before anything changes.');
+    const pasted = await askLongText('Compare with other app', `Paste a snapshot exported from ${PASTED_ENV_CAP} — you'll get to choose which version to keep for each difference before anything changes.`);
     if(pasted === null) return;
     const trimmed = pasted.trim();
     if(!trimmed) return;
@@ -2615,14 +2625,14 @@
     catch(e){ await showMessage('Compare failed', "That doesn't look like a valid snapshot — make sure you copied the whole thing."); return; }
     const diffs = diffDataSnapshots(data, incoming);
     if(diffs.length === 0){
-      await showMessage('No differences', 'This app and the pasted data match exactly.');
+      await showMessage('No differences', `${HERE_ENV_CAP} and ${PASTED_ENV_CAP} match exactly.`);
       return;
     }
     const result = await showReconcileModal(diffs, { hereModified: data._lastModified, pastedModified: incoming._lastModified });
     if(result === false) return;
     await saveData();
     render();
-    await showMessage('Reconciled', `Applied ${result} change${result===1?'':'s'} from the pasted data.`);
+    await showMessage('Reconciled', `Applied ${result} change${result===1?'':'s'} from ${PASTED_ENV_CAP}.`);
   }
 
   // Builds the Sunday weekly summary email: this week's booking duty, the next three
