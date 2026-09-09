@@ -3886,20 +3886,28 @@
     const allRoundPlayers = teamsInfo.teams.flat();
 
     // With several teams playing at once, one team's scorer doesn't need (or
-    // want) every other team's players cluttering their hole-by-hole list —
-    // so this defaults to just the signed-in viewer's own team, and falls
-    // back to everyone when the viewer isn't identified, isn't on a team
-    // this date, there's only one team anyway, or they've explicitly picked
-    // a different view. This only narrows what's DISPLAYED (and what
-    // "Accept scores" applies to) — the silent par autofill above still runs
-    // for every player on every team regardless, so nobody's holes are left
-    // unset just because nobody happened to be viewing that team.
+    // want) every other team's players cluttering their hole-by-hole list — and
+    // shouldn't be able to reach into another team's entries either, so a
+    // player who IS on a team this round is locked to just that team the whole
+    // time (no dropdown to switch away from it). Only an admin, or a viewer who
+    // isn't on a team this date at all (checking in without playing, same as
+    // before), gets the "Showing" picker and can look at/enter for any team or
+    // everyone. This only narrows what's DISPLAYED and enterable — the silent
+    // par autofill above still runs for every player on every team regardless,
+    // so nobody's holes are left unset just because nobody happened to be
+    // viewing that team. Note this is a courtesy UI restriction, not real
+    // access control — same trust basis as the rest of Scoring & Bets now that
+    // there's no PIN — so it stops accidental cross-team entry, not a
+    // determined workaround.
     const myTeamIndex = meId ? teamsInfo.teams.findIndex(team => team.some(p => p.id === meId)) : -1;
-    let teamFilter = scoringTeamFilter;
+    const canPickAnyTeam = isAdmin || myTeamIndex === -1;
+    let teamFilter = canPickAnyTeam ? scoringTeamFilter : myTeamIndex;
     if(teamFilter === 'auto') teamFilter = myTeamIndex !== -1 ? myTeamIndex : 'all';
     if(typeof teamFilter === 'number' && !teamsInfo.teams[teamFilter]) teamFilter = 'all';
-    const showTeamFilter = teamsInfo.teams.length > 1;
-    const visibleRoundPlayers = (showTeamFilter && teamFilter !== 'all') ? (teamsInfo.teams[teamFilter] || []) : allRoundPlayers;
+    const multipleTeams = teamsInfo.teams.length > 1;
+    const showTeamFilter = canPickAnyTeam && multipleTeams;
+    const filteredToTeam = multipleTeams && teamFilter !== 'all';
+    const visibleRoundPlayers = filteredToTeam ? (teamsInfo.teams[teamFilter] || []) : allRoundPlayers;
 
     const teamFilterHtml = showTeamFilter ? `
       <div style="margin-bottom:10px;">
@@ -3909,7 +3917,8 @@
             ${teamsInfo.teams.map((t, ti) => `<option value="${ti}" ${teamFilter===ti?'selected':''}>Team ${ti+1}${ti===myTeamIndex?' (mine)':''}</option>`).join('')}
           </select>
         </label>
-      </div>` : '';
+      </div>` : (filteredToTeam ? `
+      <div style="margin-bottom:10px; font-size:12px; color:#6b6a5e; font-weight:500;">Showing: Team ${teamFilter+1} <span style="font-weight:400;">— your team</span></div>` : '');
 
     // Default an unset score to par for this hole, so a group that made par can
     // just confirm and move on instead of typing every number — toggle it up or
@@ -3979,7 +3988,7 @@
     // "unconfirmed" forever. This button marks whatever's currently showing —
     // touched or still at par — as the real, confirmed score, without changing any
     // numbers, for everyone currently visible (see visibleRoundPlayers above) this hole.
-    const acceptScoresLabel = (showTeamFilter && teamFilter !== 'all') ? `Accept Team ${teamFilter + 1}'s scores for hole ${hbhHole}` : `Accept everyone's scores for hole ${hbhHole}`;
+    const acceptScoresLabel = filteredToTeam ? `Accept Team ${teamFilter + 1}'s scores for hole ${hbhHole}` : `Accept everyone's scores for hole ${hbhHole}`;
     const acceptScoresHtml = visibleRoundPlayers.length ? `
       <div style="padding:10px 0 4px; text-align:center;">
         <button type="button" class="ts-accept-scores-btn" data-accept-date="${dateKey}" data-accept-hole="${hbhHole}" data-accept-ids="${visibleRoundPlayers.map(p => p.id).join(',')}">${acceptScoresLabel}</button>
