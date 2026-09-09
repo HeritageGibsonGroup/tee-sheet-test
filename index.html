@@ -2384,8 +2384,8 @@
         id: 'roster-add-' + name,
         category: 'League roster',
         label: `${name} is in ${PASTED_ENV_LC} but not ${HERE_ENV_LC}`,
-        hereLabel: 'Leave out',
-        pastedLabel: `Add "${name}"${email ? ' (' + email + ')' : ''}`,
+        hereLabel: `Not in roster (${HERE_ENV_CAP})`,
+        pastedLabel: `In roster (${PASTED_ENV_CAP}) — add "${name}"${email ? ' (' + email + ')' : ''}`,
         apply: (d) => {
           const id = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
           const entry = { id, name };
@@ -2403,8 +2403,8 @@
         id: 'roster-remove-' + p.id,
         category: 'League roster',
         label: `${p.name} is in ${HERE_ENV_LC} but not ${PASTED_ENV_LC}`,
-        hereLabel: `Keep "${p.name}"`,
-        pastedLabel: `Remove "${p.name}"`,
+        hereLabel: `In roster (${HERE_ENV_CAP}) — keep "${p.name}"`,
+        pastedLabel: `Not in roster (${PASTED_ENV_CAP}) — remove "${p.name}"`,
         apply: (d) => { d.roster = d.roster.filter(x => x.id !== p.id); }
       });
     });
@@ -2442,8 +2442,8 @@
           id: `signup-add-${date}-${name}`,
           category: 'Signups',
           label: `${name} — ${date} (signed up in ${PASTED_ENV_LC} only)`,
-          hereLabel: 'Not signed up',
-          pastedLabel: `Add to ${date}`,
+          hereLabel: `Not signed up in ${HERE_ENV_CAP} — leave it out`,
+          pastedLabel: `Signed up in ${PASTED_ENV_CAP} only — add to ${HERE_ENV_CAP}`,
           apply: (d) => {
             const player = findHereByName(name) || d.roster.find(r => r.name.trim().toLowerCase() === name.trim().toLowerCase());
             if(!player) return;
@@ -2461,8 +2461,8 @@
           id: `signup-remove-${date}-${name}`,
           category: 'Signups',
           label: `${name} — ${date} (signed up in ${HERE_ENV_LC} only)`,
-          hereLabel: `Keep signed up`,
-          pastedLabel: `Remove from ${date}`,
+          hereLabel: `Signed up in ${HERE_ENV_CAP} only — keep in ${HERE_ENV_CAP}`,
+          pastedLabel: `Not signed up in ${PASTED_ENV_CAP} — remove from ${HERE_ENV_CAP}`,
           apply: (d) => {
             if(d.signups[date]) d.signups[date] = d.signups[date].filter(e => e.id !== curByName[name].id);
           }
