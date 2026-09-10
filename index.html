@@ -1044,9 +1044,27 @@
       }
       if(Array.isArray(info.notInBet)){
         info.notInBet.forEach((p, idx) => {
-          if(!p || ('courseHandicap' in p && 'strokesOff' in p)) return;
-          info.notInBet[idx] = Object.assign(recomputedForTeamSlot(dateKey, p), { reason: p.reason });
-          healed++;
+          if(!p) return;
+          let next = p;
+          let changed = false;
+          if(!('courseHandicap' in p && 'strokesOff' in p)){
+            next = Object.assign(recomputedForTeamSlot(dateKey, p), { reason: p.reason });
+            changed = true;
+          }
+          // Correct a stale reason for anyone who's actually a 9-hole signup today —
+          // covers entries saved before "Playing 9 holes. Not selected for a team"
+          // was introduced, and entries that came through a manual Swap/reconcile
+          // move before those paths started checking signup holes too. Leaves any
+          // other reason (e.g. an odds-numbers cut) alone.
+          const correctReason = notInBetReasonFor(dateKey, p.id, null);
+          if(correctReason === 'Playing 9 holes. Not selected for a team' && next.reason !== correctReason){
+            next = Object.assign({}, next, { reason: correctReason });
+            changed = true;
+          }
+          if(changed){
+            info.notInBet[idx] = next;
+            healed++;
+          }
         });
       }
     });
@@ -1880,6 +1898,19 @@
     };
   }
 
+  // Reason text for a player landing on the "Not playing" bench outside of a
+  // fresh computeTeamsForDate run — a manual reassignment (Swap players) or a
+  // test/live reconcile. Keeps an already-set reason (e.g. the "Odd numbers…"
+  // cut text) as-is; otherwise checks whether this player is actually only
+  // signed up for 9 holes today and says so, same wording a fresh generation
+  // would use, instead of falling back to the bare generic phrase regardless
+  // of why they're not playing.
+  function notInBetReasonFor(dateKey, playerId, existingReason){
+    if(existingReason) return existingReason;
+    const entry = (data.signups[dateKey] || []).find(s => s.id === playerId);
+    return (entry && entry.holes !== '18') ? 'Playing 9 holes. Not selected for a team' : 'Not selected for a team';
+  }
+
   // "Swap players between teams" grid — Scoring & Bets, Set up & Bets — so
   // anyone can rearrange a date's teams by hand once they exist (creating
   // them in the first place is Generate suggested teams now, above). Fully
@@ -2183,7 +2214,17 @@
     if(!data.rounds[dateKey].confirmed) data.rounds[dateKey].confirmed = {};
     if(typeof data.rounds[dateKey].startHole !== 'number') data.rounds[dateKey].startHole = 1;
     if(typeof data.rounds[dateKey].stakePerSeries !== 'number') data.rounds[dateKey].stakePerSeries = 1;
-    if(data.rounds[dateKey].game !== '1ball' && data.rounds[dateKey].game !== '2ball') data.rounds[dateKey].game = '2ball';
+    if(data.rounds[dateKey].game !== '1ball' && data.rounds[dateKey].game !== '2ball'){
+      // Default follows team size for the day — 3-player teams default to
+      // 1-ball, 4-player teams (the evenly-divides-into-4 exception in
+      // computeTeamsForDate) default to 2-ball. Only applies once, the first
+      // time this date's round settings are touched; an explicit choice via
+      // the Game dropdown is never overridden afterward. Falls back to 2-ball
+      // if teams haven't been generated for this date yet.
+      const teamsInfoForDefault = data.teams[dateKey];
+      const firstTeamSize = teamsInfoForDefault && teamsInfoForDefault.teams && teamsInfoForDefault.teams[0] ? teamsInfoForDefault.teams[0].length : null;
+      data.rounds[dateKey].game = firstTeamSize === 3 ? '1ball' : '2ball';
+    }
     // Gates Live Scoring: a freshly generated team set is accepted automatically
     // (see generateTeamsForNextPlayDay), but manually swapping a player resets
     // this back to false — see the team-assignment checkbox handler — so any
@@ -2617,7 +2658,7 @@
             const newNotInBet = [];
             (incTeamsInfo.notInBet || []).forEach(p => {
               const player = findHereByName(p.name);
-              if(player) newNotInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: p.reason || 'Not selected for a team' }));
+              if(player) newNotInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: notInBetReasonFor(date, player.id, p.reason) }));
             });
             d.teams[date] = { teams: newTeams, notInBet: newNotInBet, generatedAt: new Date().toISOString() };
             if(d.rounds && d.rounds[date]) d.rounds[date].teamsAccepted = false;
@@ -2660,7 +2701,7 @@
             if(incSlot && incSlot.kind === 'team' && teamsInfo.teams[incSlot.teamIndex]){
               teamsInfo.teams[incSlot.teamIndex].push(recomputedForTeamSlot(date, player));
             } else if(incSlot && incSlot.kind === 'notInBet'){
-              teamsInfo.notInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: 'Not selected for a team' }));
+              teamsInfo.notInBet.push(Object.assign(recomputedForTeamSlot(date, player), { reason: notInBetReasonFor(date, player.id, null) }));
             }
             // incSlot null means the pasted side doesn't have this player in the
             // round's teams at all (e.g. not signed up there) — leave them out.
@@ -4958,7 +4999,7 @@
         if(cb.checked && targetTeam >= 0){
           teamsInfo.teams[targetTeam].push(recomputedForTeamSlot(dateKeyAttr, player));
         } else {
-          teamsInfo.notInBet.push(Object.assign({}, player, { reason: player.reason || 'Not selected for a team' }));
+          teamsInfo.notInBet.push(Object.assign({}, player, { reason: notInBetReasonFor(dateKeyAttr, pid, player.reason) }));
         }
         // Any reassignment un-confirms the current teams — Live Scoring needs a
         // fresh "Accept teams after swapping players" click before it'll show
