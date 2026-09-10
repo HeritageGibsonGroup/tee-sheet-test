@@ -660,6 +660,13 @@
   // The club never gives us more than 3 tee times, so pre-confirmation
   // estimates should never assume a 4th one is possible.
   const MAX_TEE_TIMES = 3;
+  // Betting teams are always capped at 3 players, independent of how many
+  // golfers actually share a physical tee time (PLAYERS_PER_TEE_TIME above,
+  // which is about golf-course capacity, not the bet). Number of teams is
+  // still the number of confirmed tee times; anyone beyond 3 per team sits
+  // out of the bet rather than being folded into a bigger team — e.g. 10
+  // players / 3 confirmed tee times = three teams of 3, one sitting out.
+  const MAX_BET_TEAM_SIZE = 3;
   const PRO_SHOP_EMAILS = ['rdelfs@theheritageclub.net', 'rsatterwhite@theheritageclub.net'];
   // Extra CC on just the "playing tomorrow" reminder (not the pro-shop duty one).
   const GOLF_TOMORROW_EXTRA_CC = ['stevekirchhoff52@gmail.com', 'rtleene@aol.com'];
@@ -1762,7 +1769,7 @@
       if(!p) return null;
       const tee = entry.tee || p.defaultTee || null;
       const ch = courseHandicapFor(p, tee);
-      return { id: p.id, name: p.name, tee, courseHandicap: ch, reason: `Playing ${HOLES_LABEL[entry.holes] || 'nine'}` };
+      return { id: p.id, name: p.name, tee, courseHandicap: ch, reason: 'Playing 9 holes. Not selected for a team' };
     }).filter(Boolean);
 
     let players = eighteenHoleEntries.map(entry => {
@@ -1801,7 +1808,13 @@
     // Teams have to come out equal size — if the numbers don't divide evenly, whoever
     // signed up last (among the 18-hole players) sits out of the bet that day, same as
     // anyone playing nine holes. They can still play, just not part of the competition.
-    const teamSize = Math.floor(sorted.length / numTeams);
+    // Team size is normally capped at MAX_BET_TEAM_SIZE (3) so nobody's folded into a
+    // bigger team just because the headcount happens to divide evenly among fewer tee
+    // times — extra players sit out of the bet instead (see oddOneOut below). The one
+    // exception: if the 18-hole field divides EXACTLY into teams of 4 with nobody left
+    // over, use that instead of needlessly benching people — e.g. 12 players / 3
+    // confirmed tee times = three teams of 4, nobody out.
+    const teamSize = (sorted.length === numTeams * 4) ? 4 : Math.min(MAX_BET_TEAM_SIZE, Math.floor(sorted.length / numTeams));
     const usable = teamSize * numTeams;
     const oddOneOut = [];
     let eligible = sorted;
@@ -3436,7 +3449,7 @@
         ? `${confirmed.length} confirmed${standby.length ? ` <span class="ts-standby-count">+${standby.length} standby</span>` : ''}`
         : `${count} signed up`;
       const teeTimesBadge = confirmedCount
-        ? `${confirmedCount} confirmed`
+        ? `${confirmedCount} tee time${confirmedCount===1?'':'s'} confirmed`
         : `${tt} tee time${tt===1?'':'s'}`;
 
       const midSection = `
