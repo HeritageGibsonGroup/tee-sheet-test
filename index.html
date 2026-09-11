@@ -1051,13 +1051,16 @@
             next = Object.assign(recomputedForTeamSlot(dateKey, p), { reason: p.reason });
             changed = true;
           }
-          // Correct a stale reason for anyone who's actually a 9-hole signup today —
-          // covers entries saved before "Playing 9 holes. Not selected for a team"
-          // was introduced, and entries that came through a manual Swap/reconcile
-          // move before those paths started checking signup holes too. Leaves any
-          // other reason (e.g. an odds-numbers cut) alone.
+          // Correct a stale reason for anyone who's actually a 9-hole signup today,
+          // and/or stale pre-rewording text — covers entries saved before
+          // "Playing 9 holes. Not in the bet" was introduced (including its
+          // earlier "...Not selected for a team" phrasing), and entries that came
+          // through a manual Swap/reconcile move before those paths started
+          // checking signup holes too. Leaves any other reason (e.g. an
+          // odds-numbers cut) alone.
           const correctReason = notInBetReasonFor(dateKey, p.id, null);
-          if(correctReason === 'Playing 9 holes. Not selected for a team' && next.reason !== correctReason){
+          const staleReasons = ['Playing 9 holes. Not selected for a team', 'Not selected for a team'];
+          if(staleReasons.indexOf(next.reason) !== -1 && next.reason !== correctReason){
             next = Object.assign({}, next, { reason: correctReason });
             changed = true;
           }
@@ -1787,7 +1790,7 @@
       if(!p) return null;
       const tee = entry.tee || p.defaultTee || null;
       const ch = courseHandicapFor(p, tee);
-      return { id: p.id, name: p.name, tee, courseHandicap: ch, reason: 'Playing 9 holes. Not selected for a team' };
+      return { id: p.id, name: p.name, tee, courseHandicap: ch, reason: 'Playing 9 holes. Not in the bet' };
     }).filter(Boolean);
 
     let players = eighteenHoleEntries.map(entry => {
@@ -1908,7 +1911,7 @@
   function notInBetReasonFor(dateKey, playerId, existingReason){
     if(existingReason) return existingReason;
     const entry = (data.signups[dateKey] || []).find(s => s.id === playerId);
-    return (entry && entry.holes !== '18') ? 'Playing 9 holes. Not selected for a team' : 'Not selected for a team';
+    return (entry && entry.holes !== '18') ? 'Playing 9 holes. Not in the bet' : 'Not in the bet';
   }
 
   // "Swap players between teams" grid — Scoring & Bets, Set up & Bets — so
