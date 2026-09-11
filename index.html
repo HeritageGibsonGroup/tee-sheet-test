@@ -2310,10 +2310,14 @@
   // For each team and series: whether every player needed has all 6 holes
   // entered, and if so, the team's low-ball net total for that series (sum,
   // hole by hole, of its K lowest net scores — see lowBallCountFor). Then
-  // every team-pair's result per series, and each team's running $ total.
-  // Needs exact hole handicaps, since strokes have to land on one specific
-  // hole to know a player's net for it, rather than split evenly across a
-  // series.
+  // each series' single winner (lowest net across ALL teams, not a
+  // pairwise round-robin) and each team's running $ total. A series pays
+  // out only once every team's net for it is complete: the team with the
+  // lowest net collects the stake from every other team; a tie for lowest
+  // means no winner is declared and no money changes hands for anyone that
+  // series. Needs exact hole handicaps, since strokes have to land on one
+  // specific hole to know a player's net for it, rather than split evenly
+  // across a series.
   function computeSeriesStandings(dateKey){
     const teamsInfo = data.teams[dateKey];
     const round = data.rounds[dateKey];
@@ -2340,29 +2344,29 @@
     });
 
     const numTeams = teamsInfo.teams.length;
-    const matchups = [];
+    const seriesResults = [];
+    const teamTotals = Array.from({ length: numTeams }, () => 0);
     for(let si = 0; si < NUM_SERIES; si++){
-      for(let a = 0; a < numTeams; a++){
-        for(let b = a + 1; b < numTeams; b++){
-          const A = teamSeriesNet[a][si], B = teamSeriesNet[b][si];
-          let result = null;
-          if(A.complete && B.complete){
-            if(A.net < B.net) result = 'A';
-            else if(B.net < A.net) result = 'B';
-            else result = 'push';
+      const allComplete = teamSeriesNet.every(t => t[si].complete);
+      let winner = null, tie = false;
+      if(allComplete){
+        const minNet = Math.min(...teamSeriesNet.map(t => t[si].net));
+        const leaders = [];
+        teamSeriesNet.forEach((t, ti) => { if(t[si].net === minNet) leaders.push(ti); });
+        if(leaders.length === 1){
+          winner = leaders[0];
+          for(let ti = 0; ti < numTeams; ti++){
+            if(ti === winner) teamTotals[ti] += stake * (numTeams - 1);
+            else teamTotals[ti] -= stake;
           }
-          matchups.push({ seriesIndex: si, teamA: a, teamB: b, aNet: A.complete ? A.net : null, bNet: B.complete ? B.net : null, result });
+        } else {
+          tie = true; // full push — no money changes hands for anyone
         }
       }
+      seriesResults.push({ seriesIndex: si, allComplete, winner, tie });
     }
 
-    const teamTotals = Array.from({ length: numTeams }, () => 0);
-    matchups.forEach(m => {
-      if(m.result === 'A'){ teamTotals[m.teamA] += stake; teamTotals[m.teamB] -= stake; }
-      else if(m.result === 'B'){ teamTotals[m.teamB] += stake; teamTotals[m.teamA] -= stake; }
-    });
-
-    return { groups, teamSeriesNet, matchups, teamTotals, stake, exact, game };
+    return { groups, teamSeriesNet, seriesResults, teamTotals, stake, exact, game };
   }
 
   // Live "vs. par, thru N" summary per series — separate from the $ standings
