@@ -4076,11 +4076,15 @@
           const played = typeof v === 'number';
           const strokesHere = exact ? strokesReceivedOnHole(betStrokesFor(p, round.handicapBasis), h, p.tee) : 0;
           const strokeTitle = strokesHere > 0 ? ` title="${p.name.split(' ')[0]} gets ${strokesHere} stroke${strokesHere===1?'':'s'} here"` : '';
-          // Not-yet-played holes get their own muted, hatched look — a number
-          // (real, since scores no longer get a silent par pre-fill — see
-          // postHoleScores) means it's actually been posted; anything else
-          // just hasn't been played/entered yet, plain and simple.
-          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}${played ? '' : ' ts-score-not-played'}"${strokeTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${played ? '' : ' ts-score-not-played-text'}">${played ? v : '–'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}</span></td>`;
+          // Not-yet-played holes show a literal "0" in a muted, hatched cell —
+          // impossible as a real golf score, so it can never be mistaken for
+          // one, but blunter than a blank or a dash at making "nobody posted
+          // this" obvious at a glance. A number here is always real (scores
+          // no longer get a silent par pre-fill — see postHoleScores), so a
+          // team that never posts can never quietly "complete" a series —
+          // teamLowBallHoleNet/computeSeriesStandings treat a missing score
+          // as incomplete, not as par, so that team simply can't win it.
+          return `<td class="${strokesHere > 0 ? 'ts-score-stroke' : ''}${played ? '' : ' ts-score-not-played'}"${strokeTitle}><span class="ts-score-cell-wrap"><span class="ts-score-display${played ? '' : ' ts-score-not-played-text'}">${played ? v : '0'}</span>${strokesHere > 0 ? '<span class="ts-stroke-dot"></span>' : ''}</span></td>`;
         }).join('');
         // Just a label here, not a control — switching tees happens in Set up
         // & Bets before the round starts, so there's one place to change it.
