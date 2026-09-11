@@ -218,10 +218,7 @@
   .ts-score-table{ border-collapse:collapse; font-family:'IBM Plex Mono',monospace; }
   .ts-score-table th, .ts-score-table td{ text-align:center; padding:3px 2px; }
   .ts-score-table thead th{ font-size:10px; font-weight:600; color:#8b8a7c; }
-  .ts-score-table thead tr:first-child th{ font-size:9.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--fairway); padding-bottom:4px; }
   .ts-score-table td.ts-score-name, .ts-score-table th:first-child{ text-align:left; padding-right:10px; white-space:nowrap; font-family:'Inter',sans-serif; font-size:12.5px; }
-  .ts-score-table th:nth-child(8), .ts-score-table td:nth-child(8),
-  .ts-score-table th:nth-child(14), .ts-score-table td:nth-child(14){ border-left:2px solid var(--ivory-line); }
   .ts-score-input{
     width:30px; font-family:'IBM Plex Mono',monospace; font-size:12.5px; text-align:center;
     padding:4px 2px; border-radius:5px; border:1px solid var(--ivory-line);
@@ -4285,14 +4282,14 @@
       <div class="ts-import-row">
         <span class="ts-import-row-label">Live vs. par</span>
         ${groups.map((holes, si) => `
-          <div style="margin-top:${si===0?6:16}px;">
+          <div class="ts-teams-block" style="${si===0?'margin-top:6px; padding-top:0; border-top:none;':''}">
             <div class="ts-team-num">Series ${si+1}</div>
             <div style="overflow-x:auto;">
-              <table class="ts-score-table" style="width:100%;">
+              <table class="ts-score-table">
                 <thead><tr><th></th>${teamsInfo.teams.map((t, ti) => `<th>Team ${ti+1}</th>`).join('')}</tr></thead>
                 <tbody>
                   <tr><td class="ts-score-name">Holes completed</td>${teamsInfo.teams.map((t, ti) => `<td>${lowBallProgress[ti][si].holesCounted}</td>`).join('')}</tr>
-                  <tr><td class="ts-score-name">${esc(gameLabel)} vs par</td>${teamsInfo.teams.map((t, ti) => `<td>${fmtRelToPar(lowBallProgress[ti][si].relToPar)}</td>`).join('')}</tr>
+                  <tr class="ts-lowball-row"><td class="ts-score-name">${esc(gameLabel)} vs par</td>${teamsInfo.teams.map((t, ti) => `<td>${fmtRelToPar(lowBallProgress[ti][si].relToPar)}</td>`).join('')}</tr>
                 </tbody>
               </table>
             </div>
@@ -4302,20 +4299,29 @@
     const standingsHtml = standings ? `
       <div class="ts-import-row">
         <span class="ts-import-row-label">Series results (${standings.game === '1ball' ? '1-ball' : '2-ball'})</span>
-        ${groups.map((holes, si) => {
-          const rowsHtml = standings.matchups.filter(m => m.seriesIndex === si).map(m => {
-            let resultText;
-            if(!m.result) resultText = `<span class="ts-empty">in progress</span>`;
-            else if(m.result === 'push') resultText = `Push (${m.aNet}–${m.bNet})`;
-            else if(m.result === 'A') resultText = `Team ${m.teamA+1} wins ${fmtMoney(standings.stake)} (${m.aNet}–${m.bNet})`;
-            else resultText = `Team ${m.teamB+1} wins ${fmtMoney(standings.stake)} (${m.bNet}–${m.aNet})`;
-            return `<div class="ts-bet-row"><span class="ts-bet-label">Team ${m.teamA+1} vs Team ${m.teamB+1}</span><span class="ts-bet-result">${resultText}</span></div>`;
-          }).join('');
-          return `<div style="margin-top:10px;"><b style="font-size:12.5px;">Series ${si+1}</b> <span class="ts-team-so">(holes ${holes.join(', ')})</span>${rowsHtml}</div>`;
-        }).join('')}
-        <div class="ts-teams-block">
-          <div class="ts-team-num">Running total</div>
-          ${standings.teamTotals.map((t, i) => `<div class="ts-bet-row"><span class="ts-bet-label">Team ${i+1}</span><span class="ts-bet-result" style="color:${t>0?'var(--fairway)':t<0?'var(--rust)':'inherit'};">${fmtMoney(t)}</span></div>`).join('')}
+        <div style="overflow-x:auto; margin-top:8px;">
+          <table class="ts-score-table">
+            <thead>
+              <tr>
+                <th></th>
+                ${groups.map((holes, si) => `<th>Series ${si+1}</th>`).join('')}
+                <th>Wins/Losses</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${teamsInfo.teams.map((t, ti) => {
+                const total = standings.teamTotals[ti];
+                return `<tr>
+                  <td class="ts-score-name">Team ${ti+1}</td>
+                  ${groups.map((holes, si) => {
+                    const cell = lowBallProgress ? lowBallProgress[ti][si] : null;
+                    return `<td>${cell && cell.holesCounted > 0 ? fmtRelToPar(cell.relToPar) : '<span class="ts-empty">–</span>'}</td>`;
+                  }).join('')}
+                  <td style="font-weight:700; color:${total>0?'var(--fairway)':total<0?'var(--rust)':'inherit'};">${fmtMoney(total)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
         </div>
       </div>` : '';
 
@@ -5452,7 +5458,13 @@
 
     document.querySelectorAll('[data-scoring-view]').forEach(btn => {
       btn.addEventListener('click', () => {
-        scoringViewMode = btn.getAttribute('data-scoring-view');
+        const nextView = btn.getAttribute('data-scoring-view');
+        // Opening Live Scoring always starts on the signed-in viewer's own
+        // team (see the 'auto' resolution above) rather than remembering a
+        // one-off "All teams" pick from earlier in the visit — so it defaults
+        // sensibly every time, not just the first time or after a date change.
+        if(nextView === 'live') scoringTeamFilter = 'auto';
+        scoringViewMode = nextView;
         render();
       });
     });
