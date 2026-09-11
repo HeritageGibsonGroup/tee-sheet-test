@@ -241,6 +241,23 @@
     border-radius:10px; border:1px solid var(--ivory-line); background:#fff; color:var(--ink);
   }
   .ts-score-step:active{ background:var(--ivory-line); }
+  /* Hole navigator on Live Scoring: big, thumb-friendly arrows either side of
+     a narrow hole picker. › doubles as Post — see holeByHoleHtml — so it's
+     styled like the primary action (same look as ts-accept-scores-btn) while
+     ‹ (pure navigation, never saves) stays plain. */
+  .ts-hbh-nav-btn{
+    width:56px; height:56px; flex-shrink:0; font-size:28px; font-weight:700; line-height:1;
+    border-radius:12px; border:1.5px solid var(--ivory-line); background:#fff; color:var(--ink);
+  }
+  .ts-hbh-nav-btn:active{ background:var(--ivory-line); }
+  .ts-hbh-nav-btn:disabled{ opacity:.4; }
+  .ts-hbh-nav-btn-primary{ background:var(--fairway); color:var(--ivory); border-color:var(--fairway); }
+  .ts-hbh-nav-btn-primary:active{ background:var(--fairway-dark); }
+  .ts-hbh-nav-btn-primary:disabled{ background:#c7c4b6; border-color:#c7c4b6; color:#fff; opacity:1; }
+  .ts-hbh-hole-select{
+    flex:0 1 130px; font-family:'Inter'; font-size:13px; padding:8px 8px; border-radius:7px;
+    border:1px solid var(--ivory-line); text-align:center;
+  }
   .ts-score-table td.ts-score-stroke{ background:#FBF3E4; }
   .ts-score-table td.ts-score-stroke .ts-score-input{ border-color:var(--brass); }
   .ts-score-table td.ts-score-stroke .ts-score-display{ border-color:var(--brass); }
@@ -4211,28 +4228,34 @@
         </div>`;
     };
 
-    // Posts whatever's currently showing (draft edits plus anything already on
-    // file) for everyone currently visible — see visibleRoundPlayers above —
-    // in one request, and moves straight on to the next hole so the
-    // scorekeeper doesn't have to leave the course's weak signal working any
-    // harder than it has to.
-    const nextHoleNum = !isLastHole ? flatHoles[scoringHoleIndex + 1] : null;
-    const postScoresLabel = (filteredToTeam ? `Post Team ${teamFilter + 1}'s scores` : 'Post scores')
-      + (nextHoleNum !== null ? ` and move to hole ${nextHoleNum}` : ` for hole ${hbhHole}`);
+    // The › arrow itself posts whatever's currently showing (draft edits plus
+    // anything already on file) for everyone currently visible — see
+    // visibleRoundPlayers above — in one request, then moves on to the next
+    // hole; there's no separate Post button anymore. ‹ never posts — it's
+    // purely for looking back at an earlier hole (or a shotgun-start group
+    // jumping around) — so going back and re-entering something only takes
+    // effect once › is tapped again from there. On the last hole, › still
+    // posts but has nowhere further to advance to.
     const hbhUnsaved = unsavedHoleKeys.has(holePostKey(dateKey, hbhHole));
     const unsavedBannerHtml = hbhUnsaved ? `
       <div class="ts-unsaved-banner">⚠ This hole didn't save yet — it'll retry automatically. <button type="button" class="ts-unsaved-retry" data-retry-unsaved="1" style="color:var(--rust); font-size:12.5px;">Tap to retry now</button></div>` : '';
-    const postScoresHtml = visibleRoundPlayers.length ? `
-      <div style="padding:10px 0 4px; text-align:center;">
-        <button type="button" class="ts-accept-scores-btn" data-post-date="${dateKey}" data-post-hole="${hbhHole}" data-post-next="${nextHoleNum !== null ? scoringHoleIndex + 1 : ''}" data-post-ids="${visibleRoundPlayers.map(p => p.id).join(',')}">${postScoresLabel}</button>
-      </div>` : '';
 
-    const hbhRowsHtml = visibleRoundPlayers.map(hbhRowHtml).join('') + postScoresHtml;
+    const hbhRowsHtml = visibleRoundPlayers.map(hbhRowHtml).join('');
 
     const holeJumpOptionsHtml = flatHoles.map((h, idx) => {
       const p = typeof data.holePars[String(h)] === 'number' ? data.holePars[String(h)] : null;
       return `<option value="${idx}" ${idx===scoringHoleIndex?'selected':''}>Hole ${h}${p !== null ? ` (par ${p})` : ''}</option>`;
     }).join('');
+
+    // The next/post button only carries data-post-* (and so only posts)
+    // when there's actually someone visible to post for; otherwise it's
+    // plain navigation, same as ‹. Disabled only when there's truly nowhere
+    // useful for it to go: the last hole with nobody to post for.
+    const canPostHere = visibleRoundPlayers.length > 0;
+    const nextDisabled = isLastHole && !canPostHere;
+    const nextAttrs = canPostHere
+      ? ` data-post-date="${dateKey}" data-post-hole="${hbhHole}" data-post-ids="${visibleRoundPlayers.map(p => p.id).join(',')}"`
+      : '';
 
     // A freshly generated (never swapped) team set is accepted automatically —
     // see generateTeamsForNextPlayDay — so this only blocks Live Scoring while
@@ -4244,11 +4267,11 @@
       <div class="ts-teams-block" style="margin-top:16px;">
         ${teamFilterHtml}
         <div style="display:flex; align-items:center; gap:8px;">
-          <button id="ts-hbh-prev-hole" ${scoringHoleIndex===0?'disabled':''} style="padding:8px 12px; flex-shrink:0;">‹</button>
-          <select id="ts-hbh-hole-select" style="flex:1; font-family:'Inter'; font-size:13px; padding:8px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
+          <button id="ts-hbh-prev-hole" class="ts-hbh-nav-btn" ${scoringHoleIndex===0?'disabled':''}>‹</button>
+          <select id="ts-hbh-hole-select" class="ts-hbh-hole-select">
             ${holeJumpOptionsHtml}
           </select>
-          <button id="ts-hbh-next-hole" ${scoringHoleIndex===flatHoles.length-1?'disabled':''} style="padding:8px 12px; flex-shrink:0;">›</button>
+          <button id="ts-hbh-next-hole" class="ts-hbh-nav-btn ts-hbh-nav-btn-primary" ${nextDisabled?'disabled':''}${nextAttrs}>›</button>
         </div>
         <div class="ts-team-num" style="margin-top:8px;">Hole ${hbhHole}${hbhPar !== null ? ` <span class="ts-team-so">(par ${hbhPar})</span>` : ''} <span class="ts-team-so">— Series ${hbhSeriesIndex+1}, ${scoringHoleIndex+1} of ${flatHoles.length}</span></div>
         ${unsavedBannerHtml}
@@ -4384,7 +4407,7 @@
           ${standingsHtml}
         ` : `
           <h4 style="margin:16px 0 4px;">Live Scoring</h4>
-          <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Enter scores one hole at a time for this round's teams — the only place scores get entered. Nothing here saves until you tap Post.</p>
+          <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">Enter each player's score below, then tap › to post this hole and move to the next — the only place scores get entered, and nothing saves until you tap ›.</p>
           ${holeByHoleHtml}
         `}
       </div>
@@ -5448,6 +5471,9 @@
       });
     });
 
+    // ‹ is pure navigation — it never posts, so browsing back to look at (or
+    // fix) an earlier hole is always safe; nothing is sent until › is tapped
+    // again from there.
     const hbhPrevBtn = document.getElementById('ts-hbh-prev-hole');
     if(hbhPrevBtn){
       hbhPrevBtn.addEventListener('click', () => {
@@ -5455,10 +5481,47 @@
         render();
       });
     }
+    // › does double duty: when there's someone visible to post for (see
+    // data-post-ids, set in holeByHoleHtml), it posts the current hole —
+    // draft edits plus anything already on file — in one request, THEN
+    // advances; there's no separate Post button anymore. With nobody to post
+    // for it's just plain navigation, same as ‹.
     const hbhNextBtn = document.getElementById('ts-hbh-next-hole');
     if(hbhNextBtn){
-      hbhNextBtn.addEventListener('click', () => {
-        scoringHoleIndex = scoringHoleIndex + 1;
+      hbhNextBtn.addEventListener('click', async () => {
+        if(!hbhNextBtn.hasAttribute('data-post-ids')){
+          scoringHoleIndex = scoringHoleIndex + 1;
+          render();
+          return;
+        }
+        const dateKeyAttr = hbhNextBtn.getAttribute('data-post-date');
+        const holeNum = hbhNextBtn.getAttribute('data-post-hole');
+        const ids = hbhNextBtn.getAttribute('data-post-ids').split(',').filter(Boolean);
+
+        // Collect (and validate) every visible player's current value — a
+        // draft edit if there is one, otherwise whatever's already posted —
+        // before sending anything, so one bad entry doesn't post the rest of
+        // the hole halfway.
+        const entries = [];
+        for(const id of ids){
+          const input = document.getElementById(`ts-hbh-score-${id}`);
+          const raw = input ? input.value.trim() : (hbhDraft[id] !== undefined ? hbhDraft[id] : '');
+          if(raw === ''){ entries.push({ playerId: id, strokes: null }); continue; }
+          const n = parseInt(raw, 10);
+          if(isNaN(n) || n < 1 || n > 15){
+            await showMessage('Not a valid score', 'Enter a whole number of strokes between 1 and 15, or leave it blank, before posting.');
+            return;
+          }
+          entries.push({ playerId: id, strokes: n });
+        }
+
+        hbhNextBtn.disabled = true;
+        const ok = await postHoleScores(dateKeyAttr, holeNum, entries);
+        hbhDraft = {};
+        // Advance on success — renderScoringPanel clamps scoringHoleIndex back
+        // to the last hole automatically if this was already the final one,
+        // so it's safe to just always increment here.
+        if(ok) scoringHoleIndex = scoringHoleIndex + 1;
         render();
       });
     }
@@ -5500,46 +5563,6 @@
         input.value = next;
         const playerId = btn.getAttribute('data-hbh-score-player');
         if(playerId) hbhDraft[playerId] = String(next);
-      });
-    });
-
-    // This class is shared with a couple of other buttons (Generate suggested
-    // teams, Accept teams) purely for their look — only the actual "Post
-    // scores" button carries data-post-ids, so this bails out for the others
-    // rather than mistaking them for one.
-    document.querySelectorAll('.ts-accept-scores-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if(!btn.hasAttribute('data-post-ids')) return;
-        const dateKeyAttr = btn.getAttribute('data-post-date');
-        const holeNum = btn.getAttribute('data-post-hole');
-        const ids = btn.getAttribute('data-post-ids').split(',').filter(Boolean);
-
-        // Collect (and validate) every visible player's current value — a
-        // draft edit if there is one, otherwise whatever's already posted —
-        // before sending anything, so one bad entry doesn't post the rest of
-        // the hole halfway.
-        const entries = [];
-        for(const id of ids){
-          const input = document.getElementById(`ts-hbh-score-${id}`);
-          const raw = input ? input.value.trim() : (hbhDraft[id] !== undefined ? hbhDraft[id] : '');
-          if(raw === ''){ entries.push({ playerId: id, strokes: null }); continue; }
-          const n = parseInt(raw, 10);
-          if(isNaN(n) || n < 1 || n > 15){
-            await showMessage('Not a valid score', 'Enter a whole number of strokes between 1 and 15, or leave it blank, before posting.');
-            return;
-          }
-          entries.push({ playerId: id, strokes: n });
-        }
-
-        btn.disabled = true;
-        btn.textContent = 'Posting…';
-        const ok = await postHoleScores(dateKeyAttr, holeNum, entries);
-        hbhDraft = {};
-        if(ok){
-          const nextIdx = btn.getAttribute('data-post-next');
-          if(nextIdx !== '') scoringHoleIndex = parseInt(nextIdx, 10);
-        }
-        render();
       });
     });
 
