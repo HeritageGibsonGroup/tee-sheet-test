@@ -4510,8 +4510,7 @@
 
         ${scoringViewMode === 'setup' ? `
           <h4 style="margin:16px 0 4px;">Set up &amp; Bets</h4>
-          ${generateTeamsBlockHtml()}
-          <div class="ts-import-row">
+          <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
             <span class="ts-import-row-label">Round setup — ${esc(dateLabel)}</span>
             <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-top:6px;">
               <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Starting hole
@@ -4538,9 +4537,20 @@
               </label>
             </div>
           </div>
-          <div class="ts-import-row">
-            <span class="ts-import-row-label">Scoring format</span>
-            <div class="ts-subtabbar" style="margin-top:6px;">
+
+          <div style="margin-top:22px; padding-top:22px; border-top:2px solid var(--ivory-line);">
+            <h4 style="margin:0 0 4px;">Teams</h4>
+          </div>
+          ${generateTeamsBlockHtml()}
+          ${teamsDisplayHtml}
+          ${swapRowHtml}
+          ${acceptTeamsHtml}
+
+          <div style="margin-top:22px; padding-top:22px; border-top:2px solid var(--ivory-line);">
+            <h4 style="margin:0 0 4px;">Scoring Format</h4>
+          </div>
+          <div class="ts-import-row" style="margin-top:0; padding-top:0; border-top:none;">
+            <div class="ts-subtabbar">
               <button type="button" class="ts-subtab ${round.scoringMode==='teams'?'active':''}" data-scoring-mode="teams">Play as Teams</button>
               <button type="button" class="ts-subtab ${round.scoringMode==='groups'?'active':''}" data-scoring-mode="groups">Play as Groups</button>
             </div>
@@ -4549,9 +4559,6 @@
               : 'Players tee off with their own betting team. Switch to Play as Groups to mix players from different betting teams into their own physical groups for scoring.'}</p>
           </div>
           ${groupsAssignHtml}
-          ${teamsDisplayHtml}
-          ${swapRowHtml}
-          ${acceptTeamsHtml}
           ${scorecardsBlockHtml}
           <div class="ts-import-row">
             <span class="ts-import-row-label">How this bet works</span>
@@ -5638,8 +5645,14 @@
     // "Play as Teams" / "Play as Groups" — a per-round setting, saved as part
     // of a regular full-data save (same setup-time-choice pattern as Game and
     // Handicap basis above). Open to anyone, same as the rest of Set up & Bets.
+    // Renders right away and saves in the background rather than awaiting the
+    // save first — these are plain buttons whose "active" look only changes
+    // via the next render(), unlike a <select> which the browser flips
+    // instantly on its own, so waiting on a full round trip to the backend
+    // (Apps Script can take a couple of seconds) would otherwise show up as
+    // a visible lag before the toggle even looks pressed.
     document.querySelectorAll('[data-scoring-mode]').forEach(btn => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         const mode = btn.getAttribute('data-scoring-mode');
         const round = ensureRoundDefaults(scoringSelectedDate);
         if(round.scoringMode === mode) return;
@@ -5649,8 +5662,8 @@
         // resurface later — see pendingGroupAssignments above.
         pendingGroupAssignments = null;
         pendingGroupAssignmentsDate = null;
-        await saveData();
         render();
+        saveData();
       });
     });
 
