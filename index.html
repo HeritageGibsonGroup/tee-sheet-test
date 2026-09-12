@@ -433,6 +433,23 @@
     display:inline-block; font-family:'Inter',sans-serif; color:var(--fairway); font-size:13px; font-weight:600; margin:0 0 6px;
   }
   .ts-import-row p{ font-size:12px; color:#8b8a7c; margin:6px 0 0; line-height:1.5; }
+  /* "Swap players between teams" grid (see swapPlayersTableHtml) — a header
+     row of column titles (Team 1 / Team 2 / .../ Not in Bet) instead of
+     repeating those labels on every player row. */
+  .ts-assign-grid{ display:grid; column-gap:14px; row-gap:0; align-items:center; }
+  .ts-assign-head{
+    font-family:'Inter',sans-serif; font-size:10.5px; font-weight:700; color:#8b8a7c;
+    text-transform:uppercase; letter-spacing:.02em; text-align:center;
+    padding-bottom:7px; border-bottom:2px solid var(--ivory-line); white-space:nowrap;
+  }
+  .ts-assign-name{
+    font-family:'Inter',sans-serif; font-size:13px; font-weight:600;
+    padding:9px 0; border-bottom:1px solid var(--ivory-line);
+  }
+  .ts-assign-radio-cell{
+    display:flex; justify-content:center; padding:9px 0; border-bottom:1px solid var(--ivory-line);
+  }
+  .ts-assign-radio-cell input[type="radio"]{ width:18px; height:18px; cursor:pointer; }
   /* Course Information quick-jump nav — a row of plain #anchor links to the
      sections further down that panel (see renderCourseInfoPanel). Each target
      section carries scroll-margin-top via .ts-ci-section so the jump lands
@@ -1967,24 +1984,26 @@
     });
     const numTeams = teamsInfo.teams.length;
     if(!(numTeams > 0 && assignAllPlayers.length > 0)) return '';
+    const numCols = numTeams + 1; // team columns + Not in Bet
     return `
       <div class="ts-import-row">
         <span class="ts-import-row-label">Swap players between teams</span>
         <p style="margin:6px 0 8px;">${label || 'Check where each player belongs — Team 1, Team 2, or Not in bet. Regenerating teams for this date will undo any changes made here.'}</p>
-        <div>
-          ${assignAllPlayers.map(({ p, teamIndex }) => `
-            <div style="display:flex; align-items:center; gap:16px; padding:6px 0; border-bottom:1px solid var(--ivory-line); flex-wrap:wrap;">
-              <span style="flex:1; min-width:120px; font-size:13px; font-weight:600;">${esc(p.name)}</span>
+        <div style="overflow-x:auto;">
+          <div class="ts-assign-grid" style="grid-template-columns: minmax(110px,1fr) repeat(${numCols}, minmax(64px,auto)); min-width:${110 + numCols * 64 + (numCols) * 14}px;">
+            <div class="ts-assign-head"></div>
+            ${Array.from({ length: numTeams }, (_, ti) => `<div class="ts-assign-head">Team ${ti+1}</div>`).join('')}
+            <div class="ts-assign-head">Not in Bet</div>
+            ${assignAllPlayers.map(({ p, teamIndex }) => `
+              <div class="ts-assign-name">${esc(p.name)}</div>
               ${Array.from({ length: numTeams }, (_, ti) => `
-                <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:#6b6a5e; font-weight:500;">
+                <label class="ts-assign-radio-cell">
                   <input type="radio" name="ts-assign-${dateKey}-${p.id}" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="${ti}" ${teamIndex===ti?'checked':''}>
-                  Team ${ti+1}
                 </label>`).join('')}
-              <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:#6b6a5e; font-weight:500;">
+              <label class="ts-assign-radio-cell">
                 <input type="radio" name="ts-assign-${dateKey}-${p.id}" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="-1" ${teamIndex===-1?'checked':''}>
-                Not in bet
-              </label>
-            </div>`).join('')}
+              </label>`).join('')}
+          </div>
         </div>
       </div>`;
   }
