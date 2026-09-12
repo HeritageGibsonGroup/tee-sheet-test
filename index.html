@@ -977,7 +977,7 @@
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'handicaps' | 'scoring' | 'admin'
-  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'pastDuty' | 'data' | 'reminders' | 'handicaps'
+  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'pastDuty' | 'activityLog' | 'data' | 'reminders' | 'handicaps'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
   let scoringViewMode = 'setup'; // 'setup' | 'live' | 'scoreboard' | 'season' — which part of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
@@ -3493,6 +3493,7 @@
             <button class="ts-subtab ${adminSubTab==='roster'?'active':''}" data-subtab="roster">League Roster</button>
             <button class="ts-subtab ${adminSubTab==='closures'?'active':''}" data-subtab="closures">Course Information</button>
             <button class="ts-subtab ${adminSubTab==='pastDuty'?'active':''}" data-subtab="pastDuty">Past Booking Duty</button>
+            <button class="ts-subtab ${adminSubTab==='activityLog'?'active':''}" data-subtab="activityLog">Activity Log</button>
             <button class="ts-subtab ${adminSubTab==='data'?'active':''}" data-subtab="data">Data Import/Export &amp; Comparison</button>
             <button class="ts-subtab ${adminSubTab==='reminders'?'active':''}" data-subtab="reminders">Reminders</button>
             <button class="ts-subtab ${adminSubTab==='handicaps'?'active':''}" data-subtab="handicaps">Handicaps</button>
@@ -3566,6 +3567,7 @@
       if(adminSubTab === 'roster') renderRosterPanel(contentEl);
       else if(adminSubTab === 'closures') renderCourseInfoPanel(contentEl, schedule);
       else if(adminSubTab === 'pastDuty') renderPastDutyPanel(contentEl);
+      else if(adminSubTab === 'activityLog') renderActivityLogPanel(contentEl);
       else if(adminSubTab === 'data') renderDataPanel(contentEl);
       else if(adminSubTab === 'reminders') renderRemindersPanel(contentEl);
       else if(adminSubTab === 'handicaps') renderHandicapsPanel(contentEl);
@@ -5071,6 +5073,64 @@
           a place to catch a confirmed tee-time count that never got entered, or got entered wrong, while it can still be fixed.
         </p>
         <div class="ts-duty-panel">${rowsHtml}</div>
+      </div>`;
+  }
+
+  // Admin-only: surfaces data.activityLog (already recorded for the nightly email
+  // digest — see logActivity) as a live in-app list, so a signup/drop-out/duty-swap
+  // can be checked right away instead of waiting for tomorrow's email. Scoped to
+  // activity affecting a date that hasn't been played yet, newest first — a
+  // drop-out from a round played weeks ago isn't useful here.
+  function renderActivityLogPanel(el){
+    const todayKey = fmtDateKey(new Date());
+    const labelForKey = (key) => {
+      const d = new Date(key + 'T00:00:00');
+      return `${DOW_NAMES[d.getDay()]}, ${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+    };
+    const fmtWhen = (ts) => {
+      const d = new Date(ts);
+      const dateKey = fmtDateKey(d);
+      const datePart = dateKey === todayKey ? 'Today' : `${MON_NAMES[d.getMonth()]} ${d.getDate()}`;
+      let h = d.getHours(); const ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+      const timePart = `${h}:${String(d.getMinutes()).padStart(2,'0')} ${ampm}`;
+      return `${datePart}, ${timePart}`;
+    };
+
+    const entries = (data.activityLog || []).filter(e => {
+      if(e.type === 'signup' || e.type === 'dropout'){
+        return e.dateKey && e.dateKey >= todayKey;
+      }
+      if(e.type === 'swap_requested' || e.type === 'swap_accepted' || e.type === 'swap_declined'){
+        return (e.fromKey && e.fromKey >= todayKey) || (e.toKey && e.toKey >= todayKey);
+      }
+      return false;
+    }).sort((a,b) => b.ts - a.ts);
+
+    const lineFor = (e) => {
+      const who = esc(e.playerName || 'Unknown');
+      if(e.type === 'signup') return `${who} signed up for ${labelForKey(e.dateKey)}`;
+      if(e.type === 'dropout') return `${who} dropped out of ${labelForKey(e.dateKey)}`;
+      if(e.type === 'swap_requested') return `${who} requested to swap booking duty with ${esc(e.otherName || 'someone')} (${labelForKey(e.fromKey)} ↔ ${labelForKey(e.toKey)})`;
+      if(e.type === 'swap_accepted') return `${who} accepted a booking-duty swap with ${esc(e.otherName || 'someone')} (${labelForKey(e.fromKey)} ↔ ${labelForKey(e.toKey)})`;
+      if(e.type === 'swap_declined') return `${who} declined a booking-duty swap with ${esc(e.otherName || 'someone')} (${labelForKey(e.fromKey)} ↔ ${labelForKey(e.toKey)})`;
+      return `${who}: ${esc(e.type)}`;
+    };
+
+    const rowsHtml = entries.length
+      ? entries.map(e => `
+          <div class="ts-duty-row-sub" style="padding:8px 0; border-bottom:1px solid var(--ivory-line);">
+            <div>${lineFor(e)}</div>
+            <div style="font-size:11.5px; color:#8b8a7c; margin-top:2px;">${fmtWhen(e.ts)}</div>
+          </div>`).join('')
+      : `<p class="ts-empty">No signups, drop-outs, or duty swaps affecting an upcoming date yet.</p>`;
+
+    el.innerHTML = `
+      <div class="ts-roster-panel">
+        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">
+          Signups, drop-outs, and booking-duty swaps affecting a date that hasn't been played yet, most recent first.
+          (History for already-played dates isn't shown here, but still goes out in the nightly email digest.)
+        </p>
+        ${rowsHtml}
       </div>`;
   }
 
