@@ -4537,15 +4537,6 @@
                 </select>
               </label>
             </div>
-            <p style="margin:8px 0 0;">${exact
-              ? 'Strokes are applied hole-by-hole using the hole handicaps set on the Handicaps tab — shaded cells below are where that player gets a stroke.'
-              : '<span style="color:var(--rust); font-weight:600;">Hole handicaps (stroke index) aren\'t fully set on the Handicaps tab yet</span> — strokes off are being split as evenly as possible across the 3 series instead, as an approximation. Set all 18 hole handicaps for exact stroke-by-stroke allocation.'
-            } Enter each player's gross score per hole in Live Scoring; net and bet results update as scores come in.</p>
-            <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">${round.game === '1ball'
-              ? '1-ball: each hole, only the team\'s single lowest net score counts, compared to that hole\'s par.'
-              : '2-ball: each hole, the team\'s two lowest net scores count, compared to twice that hole\'s par.'
-            } Needs exact hole handicaps (see above) to allocate strokes hole by hole. Handicap basis: ${round.handicapBasis === 'hc' ? 'strokes are allocated off each player\'s full course handicap (HC).' : 'strokes are allocated off each player\'s strokes-off-the-lowest-handicap-in-the-field (S.O.).'}</p>
-            <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">With this starting hole, ${groups.map((holes, si) => `Series ${si+1} is holes ${holes[0]}–${holes[holes.length-1]}`).join(', ')}. On a shotgun start, holes don't need to be entered in this order — jump straight to whichever hole your group just finished in Live Scoring, in any order, and come back to fill in the rest later.</p>
           </div>
           <div class="ts-import-row">
             <span class="ts-import-row-label">Scoring format</span>
@@ -4557,11 +4548,23 @@
               ? 'Players tee off in the physical playing groups assembled below, mixing betting teams together however you like. The bet is still settled by betting team either way — this only changes how scores get entered in Live Scoring.'
               : 'Players tee off with their own betting team. Switch to Play as Groups to mix players from different betting teams into their own physical groups for scoring.'}</p>
           </div>
+          ${groupsAssignHtml}
           ${teamsDisplayHtml}
           ${swapRowHtml}
-          ${groupsAssignHtml}
           ${acceptTeamsHtml}
           ${scorecardsBlockHtml}
+          <div class="ts-import-row">
+            <span class="ts-import-row-label">How this bet works</span>
+            <p style="margin:8px 0 0;">${exact
+              ? 'Strokes are applied hole-by-hole using the hole handicaps set on the Handicaps tab — shaded cells below are where that player gets a stroke.'
+              : '<span style="color:var(--rust); font-weight:600;">Hole handicaps (stroke index) aren\'t fully set on the Handicaps tab yet</span> — strokes off are being split as evenly as possible across the 3 series instead, as an approximation. Set all 18 hole handicaps for exact stroke-by-stroke allocation.'
+            } Enter each player's gross score per hole in Live Scoring; net and bet results update as scores come in.</p>
+            <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">${round.game === '1ball'
+              ? '1-ball: each hole, only the team\'s single lowest net score counts, compared to that hole\'s par.'
+              : '2-ball: each hole, the team\'s two lowest net scores count, compared to twice that hole\'s par.'
+            } Needs exact hole handicaps (see above) to allocate strokes hole by hole. Handicap basis: ${round.handicapBasis === 'hc' ? 'strokes are allocated off each player\'s full course handicap (HC).' : 'strokes are allocated off each player\'s strokes-off-the-lowest-handicap-in-the-field (S.O.).'}</p>
+            <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">With this starting hole, ${groups.map((holes, si) => `Series ${si+1} is holes ${holes[0]}–${holes[holes.length-1]}`).join(', ')}. On a shotgun start, holes don't need to be entered in this order — jump straight to whichever hole your group just finished in Live Scoring, in any order, and come back to fill in the rest later.</p>
+          </div>
         ` : scoringViewMode === 'season' ? `
           <h4 style="margin:16px 0 4px;">Season standings</h4>
           ${seasonStandingsHtml}
