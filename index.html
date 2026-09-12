@@ -4835,14 +4835,27 @@
 
   function renderDutyPanel(el, schedule){
     const today = new Date(); today.setHours(0,0,0,0);
-    let rows = schedule.map(d => {
+    // `schedule` only looks forward from today, so a booking day drops off it the
+    // moment it passes — but its round can still be up to BOOKING_WINDOW_DAYS away
+    // at that point. Without this, there's a stretch (between a booking day passing
+    // and its round actually being played) where a wrongly-entered confirmed-tee-
+    // times count for an imminent, still-upcoming round becomes impossible to find
+    // or fix. Prepend just enough recently-passed booking days — ones whose own
+    // round hasn't been played yet — to close that gap.
+    const lookbackDates = [];
+    let lookbackCursor = new Date(today); lookbackCursor.setDate(lookbackCursor.getDate() - BOOKING_WINDOW_DAYS);
+    while(lookbackCursor < today){
+      if(PLAY_DOWS.includes(lookbackCursor.getDay())) lookbackDates.push(new Date(lookbackCursor));
+      lookbackCursor.setDate(lookbackCursor.getDate()+1);
+    }
+    let rows = [...lookbackDates, ...schedule].map(d => {
       const target = new Date(d); target.setDate(target.getDate() + BOOKING_WINDOW_DAYS);
       const targetKey = fmtDateKey(target);
       const assigned = dutyForKey(targetKey);
       const targetCount = (data.signups[targetKey] || []).length;
       const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
       const closed = !!data.closures[targetKey];
-      return { bookDate: d, bookKey: fmtDateKey(d), playDate: target, playKey: targetKey, assigned, tt: targetTT, closed };
+      return { bookDate: d, bookKey: fmtDateKey(d), playDate: target, playKey: targetKey, assigned, tt: targetTT, closed, bookingDayPassed: d < today };
     });
 
     const effectiveFilterId = dutyFilterId === '__me__' ? meId : dutyFilterId;
@@ -4873,7 +4886,7 @@
         : `<span class="ts-duty-static">${r.assigned ? esc(r.assigned.name) : 'Unassigned'}</span>`;
 
       let swapControl = '';
-      if(!r.closed && meId && r.assigned && r.assigned.id === meId){
+      if(!r.closed && !r.bookingDayPassed && meId && r.assigned && r.assigned.id === meId){
         const outgoing = pendingOutgoingFrom(r.playKey);
         swapControl = outgoing
           ? `<span class="ts-swap-pending">Swap requested <button data-cancel-swap="${outgoing.id}">Cancel</button></span>`
@@ -4887,8 +4900,11 @@
       const arrival = arrivalTimeFor(r.bookKey);
       const arrivalPhrase = arrival ? `at ${arrival}` : '(time varies by season)';
 
+      const bookDateLabel = `${DOW_NAMES[r.bookDate.getDay()]}, ${MON_NAMES[r.bookDate.getMonth()]} ${r.bookDate.getDate()}`;
       const subText = r.closed
         ? `<span style="color:var(--rust); font-weight:600;">🚫 Course closed two weeks from today — no need to get tee times</span>`
+        : r.bookingDayPassed
+        ? `<span style="color:var(--rust);">This round's booking day (${bookDateLabel}) has already passed — use the box below to enter or correct the confirmed tee-time count for ${playLabel}.</span>`
         : `Head to the pro shop ${dayRef} ${arrivalPhrase} and request ${r.tt} tee time${r.tt===1?'':'s'} for ${playLabel}.`;
 
       // Same rule as the date card: can't confirm real tee times before the actual
