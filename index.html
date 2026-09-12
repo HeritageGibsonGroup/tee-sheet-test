@@ -1081,20 +1081,73 @@
     return removedGhosts;
   }
 
-  // Self-heal: any already-saved team member OR "Not in the bet" entry whose
-  // courseHandicap/strokesOff were never computed at all — e.g. an old bench entry
-  // from before those fields were tracked there, whether it later got swapped onto
-  // a team or is still sitting out — gets them recomputed here, the same way a
-  // fresh team generation would. Only touches entries missing the fields outright
-  // (an explicit null, once already computed, is left alone — that means "known to
+  // Self-heal, run on every load (and right after a signup/drop-out changes, so it
+  // doesn't have to wait for a reload): (1) drops any team member or "Not in the
+  // bet" entry for a player who is no longer signed up for that date AT ALL — e.g.
+  // they dropped out (or an admin removed them) after teams were already
+  // generated. (2) adds anyone newly (and actually confirmed, not standby) signed
+  // up who isn't in the date's teams/notInBet at all yet, into "Not in Bet" so
+  // they show up in Swap players to be placed onto a team. Together, (1) and (2)
+  // are what let Swap players double as "reconcile the roster" instead of only
+  // "rearrange it" — the one thing "Generate suggested teams now" (disabled once
+  // teams exist, to avoid discarding manual swaps) can no longer do. (3) any
+  // remaining team member OR "Not in the bet" entry whose courseHandicap/
+  // strokesOff were never computed at all — e.g. an old bench entry from before
+  // those fields were tracked there, whether it later got swapped onto a team or
+  // is still sitting out — gets them recomputed here, the same way a fresh team
+  // generation would. Only touches entries missing the fields outright (an
+  // explicit null, once already computed, is left alone — that means "known to
   // have no handicap," not "never checked"), so this doesn't keep re-triggering a
   // save for players who genuinely don't have one on file. Returns how many
-  // players were healed, so callers can surface or act on that.
+  // players were healed (added, removed, or recomputed), so callers can surface
+  // or act on that.
   function normalizeTeams(){
     let healed = 0;
     Object.keys(data.teams).forEach(dateKey => {
       const info = data.teams[dateKey];
       if(!info) return;
+      const signedUpIds = new Set((data.signups[dateKey] || []).map(s => s.id));
+      if(Array.isArray(info.teams)){
+        info.teams.forEach(team => {
+          for(let i = team.length - 1; i >= 0; i--){
+            if(team[i] && !signedUpIds.has(team[i].id)){ team.splice(i, 1); healed++; }
+          }
+        });
+      }
+      if(Array.isArray(info.notInBet)){
+        const beforeCount = info.notInBet.length;
+        info.notInBet = info.notInBet.filter(p => !p || signedUpIds.has(p.id));
+        healed += beforeCount - info.notInBet.length;
+      }
+      // The mirror image of the removal above: add anyone newly signed up — and
+      // actually confirmed to play, not standby, since a standby player isn't
+      // really in yet — who isn't in this date's teams/notInBet at all (e.g. they
+      // signed up after teams were already generated). Dropped into "Not in Bet"
+      // with a reason that says why, since Swap players (not a fresh generation,
+      // which stays off-limits once teams exist) is where they actually get
+      // placed onto a team.
+      if(Array.isArray(info.teams) && Array.isArray(info.notInBet)){
+        const presentIds = new Set([
+          ...info.teams.flat().filter(Boolean).map(p => p.id),
+          ...info.notInBet.filter(Boolean).map(p => p.id)
+        ]);
+        const capacity = capacityFor(dateKey);
+        const { confirmed: confirmedEntries } = splitConfirmedStandby(data.signups[dateKey] || [], capacity);
+        confirmedEntries.forEach(entry => {
+          if(presentIds.has(entry.id)) return;
+          const rosterPlayer = data.roster.find(r => r.id === entry.id);
+          if(!rosterPlayer) return;
+          const reason = entry.holes !== '18'
+            ? 'Playing 9 holes. Not in the bet'
+            : 'Signed up after teams were set — assign a team below';
+          info.notInBet.push(Object.assign(
+            recomputedForTeamSlot(dateKey, { id: entry.id, name: rosterPlayer.name, tee: entry.tee }),
+            { reason }
+          ));
+          presentIds.add(entry.id);
+          healed++;
+        });
+      }
       if(Array.isArray(info.teams)){
         info.teams.forEach(team => {
           team.forEach((p, idx) => {
@@ -6079,12 +6132,22 @@
           if(me && me.defaultTee) entry.tee = me.defaultTee;
           list.push(entry);
           logActivity('signup', { dateKey: key });
+          // If teams were already generated for this date and there's room
+          // (within confirmed tee times), reconcile them right away so this
+          // signup shows up in Swap players instead of waiting for a page
+          // reload — see normalizeTeams().
+          normalizeTeams();
         } else if(!wantIn && idx !== -1){
           const beforeConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           const droppedPlayer = data.roster.find(p => p.id === meId);
           const wasConfirmed = beforeConfirmedIds.includes(meId);
           list.splice(idx,1);
           logActivity('dropout', { dateKey: key });
+          // If teams were already generated for this date, drop this player out of
+          // them too (team slot or "Not in Bet") right away — otherwise they'd
+          // linger as a ghost in Swap players until the next page load runs the
+          // same cleanup (see normalizeTeams()).
+          normalizeTeams();
           const afterConfirmedIds = splitConfirmedStandby(list, capacity).confirmed.map(x => x.id);
           const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
           if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
@@ -6142,6 +6205,9 @@
         const removedPlayer = data.roster.find(p => p.id === pid);
         const wasConfirmed = beforeConfirmedIds.includes(pid);
         data.signups[key] = (data.signups[key] || []).filter(x => x.id !== pid);
+        // Same team/"Not in Bet" cleanup as the self-service drop-out — otherwise
+        // an admin-removed player lingers as a ghost in Swap players too.
+        normalizeTeams();
         const afterConfirmedIds = splitConfirmedStandby(data.signups[key], capacity).confirmed.map(x => x.id);
         const newlyPromoted = afterConfirmedIds.filter(id => !beforeConfirmedIds.includes(id));
         if(newlyPromoted.length) notifyPromoted(key, newlyPromoted);
@@ -6167,6 +6233,7 @@
         const list = data.signups[key] || (data.signups[key] = []);
         if(!list.some(x => x.id === pid)){
           list.push({ id: pid, holes: '18' });
+          normalizeTeams();
         }
         await saveData();
         render();
@@ -6190,6 +6257,7 @@
         data.roster.push({ id, name: finalName, isGuest: true });
         const list = data.signups[key] || (data.signups[key] = []);
         list.push({ id, holes: '18' });
+        normalizeTeams();
         await saveData();
         render();
       });
