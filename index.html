@@ -977,7 +977,7 @@
   let expanded = {};
   let expandCollapseState = null; // 'expand' | 'collapse' | null — just for the subtle indicator
   let activeSection = 'schedule'; // 'schedule' | 'duty' | 'handicaps' | 'scoring' | 'admin'
-  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'data' | 'reminders' | 'handicaps'
+  let adminSubTab = 'roster'; // 'roster' | 'closures' | 'pastDuty' | 'data' | 'reminders' | 'handicaps'
   let scoringSelectedDate = null; // dateKey currently shown on the Scoring & Bets tab
   let scoringViewMode = 'setup'; // 'setup' | 'live' | 'scoreboard' | 'season' — which part of Scoring & Bets is showing
   let scoringHoleIndex = 0; // position within flatHoles for the hole-by-hole view
@@ -3492,6 +3492,7 @@
           <div class="ts-subtabbar">
             <button class="ts-subtab ${adminSubTab==='roster'?'active':''}" data-subtab="roster">League Roster</button>
             <button class="ts-subtab ${adminSubTab==='closures'?'active':''}" data-subtab="closures">Course Information</button>
+            <button class="ts-subtab ${adminSubTab==='pastDuty'?'active':''}" data-subtab="pastDuty">Past Booking Duty</button>
             <button class="ts-subtab ${adminSubTab==='data'?'active':''}" data-subtab="data">Data Import/Export &amp; Comparison</button>
             <button class="ts-subtab ${adminSubTab==='reminders'?'active':''}" data-subtab="reminders">Reminders</button>
             <button class="ts-subtab ${adminSubTab==='handicaps'?'active':''}" data-subtab="handicaps">Handicaps</button>
@@ -3564,6 +3565,7 @@
       const contentEl = document.getElementById('ts-admin-content');
       if(adminSubTab === 'roster') renderRosterPanel(contentEl);
       else if(adminSubTab === 'closures') renderCourseInfoPanel(contentEl, schedule);
+      else if(adminSubTab === 'pastDuty') renderPastDutyPanel(contentEl);
       else if(adminSubTab === 'data') renderDataPanel(contentEl);
       else if(adminSubTab === 'reminders') renderRemindersPanel(contentEl);
       else if(adminSubTab === 'handicaps') renderHandicapsPanel(contentEl);
@@ -4833,30 +4835,36 @@
     await showMessage(accept ? 'Swap complete' : 'Declined', accept ? 'The two dates have been swapped.' : "You've declined the swap.");
   }
 
+  // Shared by the normal (forward-looking) Booking Duty tab and the admin-only Past
+  // Booking Duty panel — builds one row's worth of data for a given booking date.
+  function buildDutyRow(d, today){
+    const target = new Date(d); target.setDate(target.getDate() + BOOKING_WINDOW_DAYS);
+    const targetKey = fmtDateKey(target);
+    const assigned = dutyForKey(targetKey);
+    const targetCount = (data.signups[targetKey] || []).length;
+    const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
+    const closed = !!data.closures[targetKey];
+    return { bookDate: d, bookKey: fmtDateKey(d), playDate: target, playKey: targetKey, assigned, tt: targetTT, closed, bookingDayPassed: d < today };
+  }
+
+  // The lookback window used by Past Booking Duty: every booking day from exactly
+  // BOOKING_WINDOW_DAYS ago up to (not including) today — i.e. every booking day
+  // whose own round hasn't been played yet, but which already happened, so it's no
+  // longer in the normal forward-looking schedule. A booking day moves here the day
+  // AFTER it happens (today's own booking day still shows in the normal tab).
+  function pastDutyDates(today){
+    const dates = [];
+    let cursor = new Date(today); cursor.setDate(cursor.getDate() - BOOKING_WINDOW_DAYS);
+    while(cursor < today){
+      if(PLAY_DOWS.includes(cursor.getDay())) dates.push(new Date(cursor));
+      cursor.setDate(cursor.getDate()+1);
+    }
+    return dates;
+  }
+
   function renderDutyPanel(el, schedule){
     const today = new Date(); today.setHours(0,0,0,0);
-    // `schedule` only looks forward from today, so a booking day drops off it the
-    // moment it passes — but its round can still be up to BOOKING_WINDOW_DAYS away
-    // at that point. Without this, there's a stretch (between a booking day passing
-    // and its round actually being played) where a wrongly-entered confirmed-tee-
-    // times count for an imminent, still-upcoming round becomes impossible to find
-    // or fix. Prepend just enough recently-passed booking days — ones whose own
-    // round hasn't been played yet — to close that gap.
-    const lookbackDates = [];
-    let lookbackCursor = new Date(today); lookbackCursor.setDate(lookbackCursor.getDate() - BOOKING_WINDOW_DAYS);
-    while(lookbackCursor < today){
-      if(PLAY_DOWS.includes(lookbackCursor.getDay())) lookbackDates.push(new Date(lookbackCursor));
-      lookbackCursor.setDate(lookbackCursor.getDate()+1);
-    }
-    let rows = [...lookbackDates, ...schedule].map(d => {
-      const target = new Date(d); target.setDate(target.getDate() + BOOKING_WINDOW_DAYS);
-      const targetKey = fmtDateKey(target);
-      const assigned = dutyForKey(targetKey);
-      const targetCount = (data.signups[targetKey] || []).length;
-      const targetTT = targetCount > 0 ? Math.min(MAX_TEE_TIMES, Math.ceil(targetCount/PLAYERS_PER_TEE_TIME)) : 0;
-      const closed = !!data.closures[targetKey];
-      return { bookDate: d, bookKey: fmtDateKey(d), playDate: target, playKey: targetKey, assigned, tt: targetTT, closed, bookingDayPassed: d < today };
-    });
+    let rows = schedule.map(d => buildDutyRow(d, today));
 
     const effectiveFilterId = dutyFilterId === '__me__' ? meId : dutyFilterId;
     if(dutySort !== 'calendar'){
@@ -4886,7 +4894,7 @@
         : `<span class="ts-duty-static">${r.assigned ? esc(r.assigned.name) : 'Unassigned'}</span>`;
 
       let swapControl = '';
-      if(!r.closed && !r.bookingDayPassed && meId && r.assigned && r.assigned.id === meId){
+      if(!r.closed && meId && r.assigned && r.assigned.id === meId){
         const outgoing = pendingOutgoingFrom(r.playKey);
         swapControl = outgoing
           ? `<span class="ts-swap-pending">Swap requested <button data-cancel-swap="${outgoing.id}">Cancel</button></span>`
@@ -4900,11 +4908,8 @@
       const arrival = arrivalTimeFor(r.bookKey);
       const arrivalPhrase = arrival ? `at ${arrival}` : '(time varies by season)';
 
-      const bookDateLabel = `${DOW_NAMES[r.bookDate.getDay()]}, ${MON_NAMES[r.bookDate.getMonth()]} ${r.bookDate.getDate()}`;
       const subText = r.closed
         ? `<span style="color:var(--rust); font-weight:600;">🚫 Course closed two weeks from today — no need to get tee times</span>`
-        : r.bookingDayPassed
-        ? `<span style="color:var(--rust);">This round's booking day (${bookDateLabel}) has already passed — use the box below to enter or correct the confirmed tee-time count for ${playLabel}.</span>`
         : `Head to the pro shop ${dayRef} ${arrivalPhrase} and request ${r.tt} tee time${r.tt===1?'':'s'} for ${playLabel}.`;
 
       // Same rule as the date card: can't confirm real tee times before the actual
@@ -5007,6 +5012,65 @@
         <div class="ts-duty-panel">
           ${dutySort === 'calendar' ? calendarHtml : rowsHtml}
         </div>
+      </div>`;
+  }
+
+  // Admin-only: a booking day drops out of the normal (forward-looking) Booking
+  // Duty tab the moment it passes, but its round can still be days away — this is
+  // where it lives in the meantime, so a wrongly-entered (or never-entered)
+  // confirmed tee-time count can still be caught and fixed before the round is
+  // actually played. A date moves here automatically the day after its booking
+  // day (today's own booking day still shows in the normal tab), and drops out of
+  // here on its own once BOOKING_WINDOW_DAYS have passed (its round has been played).
+  function renderPastDutyPanel(el){
+    const today = new Date(); today.setHours(0,0,0,0);
+    const rows = pastDutyDates(today).map(d => buildDutyRow(d, today));
+
+    const rowsHtml = rows.length ? rows.map(r => {
+      const playLabel = `${DOW_NAMES[r.playDate.getDay()]}, ${MON_NAMES[r.playDate.getMonth()]} ${r.playDate.getDate()}`;
+      const bookDateLabel = `${DOW_NAMES[r.bookDate.getDay()]}, ${MON_NAMES[r.bookDate.getMonth()]} ${r.bookDate.getDate()}`;
+
+      const assignedControl = `<select data-panel-duty-key="${r.playKey}">
+           <option value="">Unassigned</option>
+           ${sortedRoster().map(p => `<option value="${p.id}" ${r.assigned && r.assigned.id===p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+         </select>`;
+
+      const subText = r.closed
+        ? `<span style="color:var(--rust); font-weight:600;">🚫 Course was closed — no tee times were needed for ${playLabel}</span>`
+        : `Booking day was ${bookDateLabel} — enter or correct the confirmed tee-time count for ${playLabel} below.`;
+
+      const confirmed = data.confirmedTeeTimes[r.playKey];
+      const confirmControl = r.closed ? '' : `<div class="ts-duty-row-sub ts-confirm-row">
+            <label>Confirmed for ${playLabel}:</label>
+            <select data-confirm-key="${r.playKey}" style="width:52px; font-family:'Inter'; font-size:13px; padding:5px 4px; border-radius:6px; border:1px solid var(--ivory-line);">
+              <option value="" ${!confirmed?'selected':''}>–</option>
+              ${[1,2,3].map(n => `<option value="${n}" ${confirmed===n?'selected':''}>${n}</option>`).join('')}
+            </select>
+            <span>tee time${confirmed===1?'':'s'} booked</span>
+          </div>`;
+
+      return `
+        <div class="ts-duty-row">
+          <div class="ts-date-block">
+            <div class="ts-date-dow">${DOW_NAMES[r.bookDate.getDay()]}</div>
+            <div class="ts-date-num">${r.bookDate.getDate()}</div>
+            <div class="ts-date-mon">${MON_NAMES[r.bookDate.getMonth()]}</div>
+          </div>
+          <div class="ts-duty-row-mid">
+            ${assignedControl}
+            <div class="ts-duty-row-sub">${subText}</div>
+            ${confirmControl}
+          </div>
+        </div>`;
+    }).join('') : `<p class="ts-empty">Nothing here right now — every recent booking day is either still showing in the regular Booking Duty tab, or its round has already been played.</p>`;
+
+    el.innerHTML = `
+      <div class="ts-roster-panel">
+        <p class="ts-note" style="border-top:none; padding-top:0; margin-top:0;">
+          A booking day lands here the day after it happens, and stays until its round is actually played —
+          a place to catch a confirmed tee-time count that never got entered, or got entered wrong, while it can still be fixed.
+        </p>
+        <div class="ts-duty-panel">${rowsHtml}</div>
       </div>`;
   }
 
