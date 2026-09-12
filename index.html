@@ -953,7 +953,7 @@
     }catch(e){ /* best-effort */ }
   }
 
-  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, holeHandicaps: {}, holeHandicapsRed: {"1":7,"2":17,"3":13,"4":3,"5":9,"6":1,"7":5,"8":15,"9":11,"10":8,"11":10,"12":16,"13":2,"14":4,"15":6,"16":14,"17":18,"18":12}, holePars: {}, adminPin: null, guestPin: '3672', playerPins: {}, activityLog: [] };
+  let data = { roster: [], signups: {}, duty: {}, closures: {}, swapRequests: {}, confirmedTeeTimes: {}, teeTimeSchedule: {}, teeRatings: {}, teeOptions: [], teams: {}, rounds: {}, playingGroups: {}, holeHandicaps: {}, holeHandicapsRed: {"1":7,"2":17,"3":13,"4":3,"5":9,"6":1,"7":5,"8":15,"9":11,"10":8,"11":10,"12":16,"13":2,"14":4,"15":6,"16":14,"17":18,"18":12}, holePars: {}, adminPin: null, guestPin: '3672', playerPins: {}, activityLog: [] };
   // Set when the very first load couldn't reach the backend at all (network hiccup,
   // or the fetch timing out per FETCH_TIMEOUT_MS above) — distinct from a
   // successful load that happens to find an empty roster, so init() can show a
@@ -988,6 +988,18 @@
   // picked themselves. Resets to 'auto' on reload, so this is just a
   // convenience for the current visit, not a saved preference.
   let scoringTeamFilter = 'auto';
+  // Local, not-yet-saved edits to a date's playing-group assignments (see
+  // "Assemble playing groups") — a working copy of data.playingGroups[date],
+  // keyed by playerId -> group index, edited purely in memory as radios are
+  // clicked so a whole assembly session (often 9-12 players) doesn't fire a
+  // Google Sheets save per click. Nothing here reaches data.playingGroups or
+  // the backend until "Accept groups" is tapped. null means no edit is in
+  // progress, in which case the grid just reads straight from
+  // data.playingGroups[date]. pendingGroupAssignmentsDate guards against a
+  // date switch (or leaving Play as Groups) leaving a stale in-progress edit
+  // around to accidentally resurface later.
+  let pendingGroupAssignments = null;
+  let pendingGroupAssignmentsDate = null;
   // Local, not-yet-posted edits for whichever hole is currently on screen —
   // keyed by playerId, value is the string currently in that player's box (or
   // '' for blank). Nothing here has reached round.scores or the backend yet;
@@ -1145,6 +1157,13 @@
     if(!data.teeOptions) data.teeOptions = [];
     if(!data.teams) data.teams = {};
     if(!data.rounds) data.rounds = {};
+    // Playing-group assignments — a date's players sorted into physical
+    // groups for score entry, independent of their betting team (see
+    // "Play as Teams" / "Play as Groups" in Set up & Bets). Keyed by date,
+    // then by playerId -> group index (0-based); a player with no entry is
+    // Unassigned. Purely a scoring-UI convenience — the bet is always
+    // settled by betting-team roster (data.teams), never by this.
+    if(!data.playingGroups) data.playingGroups = {};
     if(!data.holeHandicaps) data.holeHandicaps = {};
     // Seeded once, the first time this field ever loads, with Heritage's actual
     // Red-tee stroke index (from the club's scorecard) — from then on this is
@@ -1876,6 +1895,22 @@
       return b.strokesOff - a.strokesOff;
     });
 
+    // Shuffle within each draft "round" — each consecutive block of numTeams
+    // players in the sorted order is exactly the group the snake draft below
+    // hands one to each team from, in some order. Randomizing the order
+    // inside each block still gives every team one similarly-skilled player
+    // per round (aggregate handicaps stay just as balanced), but which
+    // specific player of that skill level lands on which team varies each
+    // time teams are generated — otherwise the same field of players (same
+    // handicaps, same signup order) always produces the identical pairings.
+    for(let i = 0; i < sorted.length; i += numTeams){
+      const end = Math.min(i + numTeams, sorted.length);
+      for(let j = end - 1; j > i; j--){
+        const k = i + Math.floor(Math.random() * (j - i + 1));
+        const tmp = sorted[j]; sorted[j] = sorted[k]; sorted[k] = tmp;
+      }
+    }
+
     // Teams have to come out equal size — if the numbers don't divide evenly, whoever
     // signed up last (among the 18-hole players) sits out of the bet that day, same as
     // anyone playing nine holes. They can still play, just not part of the competition.
@@ -2006,6 +2041,68 @@
                 <input type="radio" name="ts-assign-${dateKey}-${p.id}" data-assign-date="${dateKey}" data-assign-player="${p.id}" data-assign-team="-1" ${teamIndex===-1?'checked':''}>
               </label>`).join('')}
           </div>
+        </div>
+      </div>`;
+  }
+
+  // "Assemble playing groups" — same grid look as swapPlayersTableHtml above,
+  // but assigns players to physical playing groups (who actually tees off
+  // together) instead of betting teams. Only shown when a round's
+  // scoringMode is 'groups'. Only bet-eligible players (teamsInfo.teams.flat())
+  // are listed — Live Scoring never tracks scores for anyone not on a
+  // betting team, so a "Not playing" player has no group to fill in either.
+  // Number of groups always matches the number of betting teams. Storage is
+  // a plain playerId -> group index map (data.playingGroups[dateKey]); no
+  // entry means Unassigned.
+  //
+  // Unlike swapping betting teams (each swap saves immediately, and "Accept
+  // teams" only gates when Live Scoring reflects it), group assignment
+  // edits are held in pendingGroupAssignments — a local, in-memory-only
+  // working copy — and never touch the network until "Accept groups" is
+  // tapped, which saves once for the whole session. With up to a dozen
+  // players to place, saving on every single click would mean a dozen
+  // separate round trips to the Apps Script backend instead of one.
+  function assignGroupsTableHtml(dateKey, teamsInfo){
+    const numGroups = teamsInfo.teams.length;
+    const players = teamsInfo.teams.flat();
+    if(!(numGroups > 0 && players.length > 0)) return '';
+    const hasPending = pendingGroupAssignments !== null && pendingGroupAssignmentsDate === dateKey;
+    const assignments = hasPending ? pendingGroupAssignments : (data.playingGroups[dateKey] || {});
+    const assignAllPlayers = players.map(p => {
+      const gi = assignments[p.id];
+      return { p, groupIndex: (typeof gi === 'number' && gi >= 0 && gi < numGroups) ? gi : -1 };
+    }).sort((a, b) => {
+      const ah = typeof a.p.courseHandicap === 'number' ? a.p.courseHandicap : Infinity;
+      const bh = typeof b.p.courseHandicap === 'number' ? b.p.courseHandicap : Infinity;
+      if(ah !== bh) return ah - bh;
+      return a.p.name.localeCompare(b.p.name);
+    });
+    const numCols = numGroups + 1; // group columns + Unassigned
+    return `
+      <div class="ts-import-row">
+        <span class="ts-import-row-label">Assemble playing groups</span>
+        <p style="margin:6px 0 8px;">Check which group each player is actually teeing off with today — mix players from any betting team however you like. Everyone starts Unassigned; the bet is still settled by betting team no matter how these are set.</p>
+        <div style="overflow-x:auto;">
+          <div class="ts-assign-grid" style="grid-template-columns: minmax(84px,1fr) repeat(${numCols}, minmax(44px,auto)); min-width:${84 + numCols * 44 + numCols * 6}px;">
+            <div class="ts-assign-head"></div>
+            ${Array.from({ length: numGroups }, (_, gi) => `<div class="ts-assign-head">Group ${gi+1}</div>`).join('')}
+            <div class="ts-assign-head">Unassigned</div>
+            ${assignAllPlayers.map(({ p, groupIndex }) => `
+              <div class="ts-assign-name">${esc(p.name)}</div>
+              ${Array.from({ length: numGroups }, (_, gi) => `
+                <label class="ts-assign-radio-cell">
+                  <input type="radio" name="ts-group-assign-${dateKey}-${p.id}" data-group-assign-date="${dateKey}" data-group-assign-player="${p.id}" data-group-assign-group="${gi}" ${groupIndex===gi?'checked':''}>
+                </label>`).join('')}
+              <label class="ts-assign-radio-cell">
+                <input type="radio" name="ts-group-assign-${dateKey}-${p.id}" data-group-assign-date="${dateKey}" data-group-assign-player="${p.id}" data-group-assign-group="-1" ${groupIndex===-1?'checked':''}>
+              </label>`).join('')}
+          </div>
+        </div>
+        <div class="ts-accept-teams-wrap" style="padding:14px 0 4px; text-align:center;">
+          <button type="button" class="ts-accept-scores-btn" id="ts-accept-groups-btn"${hasPending ? '' : ' disabled'}>Accept groups</button>
+          <p style="margin:8px 0 0; font-size:12px; color:#6b6a5e;">${hasPending
+            ? 'Not saved yet — click above to save these groups.'
+            : 'No pending changes.'}</p>
         </div>
       </div>`;
   }
@@ -2294,6 +2391,16 @@
     // swap needs a fresh, deliberate "Accept teams after swapping players"
     // click before Live Scoring reflects it.
     if(typeof data.rounds[dateKey].teamsAccepted !== 'boolean') data.rounds[dateKey].teamsAccepted = false;
+    // 'teams' (default): Live Scoring, the "Showing" filter, and printable
+    // scorecards all group players by their betting team. 'groups': players
+    // instead tee off in physical playing groups assembled separately (see
+    // "Assemble playing groups" in Set up & Bets) — mixing handicaps across
+    // betting teams however people like — while the bet itself is still
+    // settled by betting-team roster either way; only how scores get entered
+    // changes. Defaults to 'teams'; an explicit choice is never overridden.
+    if(data.rounds[dateKey].scoringMode !== 'teams' && data.rounds[dateKey].scoringMode !== 'groups'){
+      data.rounds[dateKey].scoringMode = 'teams';
+    }
     return data.rounds[dateKey];
   }
 
@@ -4088,9 +4195,15 @@
     // Swap players between teams — see swapPlayersTableHtml for what this does.
     const swapRowHtml = swapPlayersTableHtml(dateKey, teamsInfo);
 
-    // Printable scorecards — see scorecardsHtml; also shown for the upcoming
-    // round on the public Handicaps page as a quick reference/print there.
-    const scorecardsBlockHtml = scorecardsHtml(dateKey);
+    // "Assemble playing groups" — only relevant once "Play as Groups" is
+    // chosen below; see assignGroupsTableHtml.
+    const groupsAssignHtml = round.scoringMode === 'groups' ? assignGroupsTableHtml(dateKey, teamsInfo) : '';
+
+    // Printable scorecards don't make sense once players are mixed into
+    // playing groups instead of sitting with their betting team — skip them
+    // entirely in that mode rather than handing out a card that doesn't
+    // match who's actually standing together.
+    const scorecardsBlockHtml = round.scoringMode === 'groups' ? '' : scorecardsHtml(dateKey);
 
     const acceptTeamsHtml = `
       <div class="ts-accept-teams-wrap" style="padding:14px 0 4px; text-align:center;">
@@ -4176,40 +4289,54 @@
     // anyone not on a team, so that's the only group Live Scoring ever shows.
     const allRoundPlayers = teamsInfo.teams.flat();
 
-    // With several teams playing at once, one team's scorer doesn't need (or
-    // want) every other team's players cluttering their hole-by-hole list — and
-    // shouldn't be able to reach into another team's entries either, so a
-    // player who IS on a team this round is locked to just that team the whole
-    // time (no dropdown to switch away from it). Only an admin, or a viewer who
-    // isn't on a team this date at all (checking in without playing, same as
-    // before), gets the "Showing" picker and can look at/enter for any team or
-    // everyone. This only narrows what's DISPLAYED and enterable — the silent
-    // par autofill above still runs for every player on every team regardless,
-    // so nobody's holes are left unset just because nobody happened to be
-    // viewing that team. Note this is a courtesy UI restriction, not real
-    // access control — same trust basis as the rest of Scoring & Bets now that
-    // there's no PIN — so it stops accidental cross-team entry, not a
-    // determined workaround.
-    const myTeamIndex = meId ? teamsInfo.teams.findIndex(team => team.some(p => p.id === meId)) : -1;
-    const canPickAnyTeam = isAdmin || myTeamIndex === -1;
-    let teamFilter = canPickAnyTeam ? scoringTeamFilter : myTeamIndex;
-    if(teamFilter === 'auto') teamFilter = myTeamIndex !== -1 ? myTeamIndex : 'all';
-    if(typeof teamFilter === 'number' && !teamsInfo.teams[teamFilter]) teamFilter = 'all';
-    const multipleTeams = teamsInfo.teams.length > 1;
-    const showTeamFilter = canPickAnyTeam && multipleTeams;
-    const filteredToTeam = multipleTeams && teamFilter !== 'all';
-    const visibleRoundPlayers = filteredToTeam ? (teamsInfo.teams[teamFilter] || []) : allRoundPlayers;
+    // With several teams (or playing groups) out at once, one scorer doesn't
+    // need (or want) everyone else's players cluttering their hole-by-hole
+    // list — and shouldn't be able to reach into another group's entries
+    // either, so a player who IS on a team/group this round is locked to
+    // just that one the whole time (no dropdown to switch away from it).
+    // Only an admin, or a viewer who isn't placed at all this date (checking
+    // in without playing, same as before), gets the "Showing" picker and can
+    // look at/enter for any team/group or everyone. This only narrows what's
+    // DISPLAYED and enterable — the silent par autofill above still runs for
+    // every player regardless, so nobody's holes are left unset just because
+    // nobody happened to be viewing them. Note this is a courtesy UI
+    // restriction, not real access control — same trust basis as the rest of
+    // Scoring & Bets now that there's no PIN — so it stops accidental
+    // cross-entry, not a determined workaround.
+    //
+    // In "Play as Groups" mode, the same picker filters by physical playing
+    // group instead of betting team — see assignGroupsTableHtml/
+    // data.playingGroups. Either way it's the exact same bet-eligible player
+    // pool (allRoundPlayers); only how they're partitioned changes.
+    const groupsMode = round.scoringMode === 'groups';
+    const groupAssignments = data.playingGroups[dateKey] || {};
+    const rosterSource = groupsMode
+      ? Array.from({ length: teamsInfo.teams.length }, (_, gi) => allRoundPlayers.filter(p => groupAssignments[p.id] === gi))
+      : teamsInfo.teams;
+    const myIndex = meId ? (groupsMode
+      ? (typeof groupAssignments[meId] === 'number' ? groupAssignments[meId] : -1)
+      : teamsInfo.teams.findIndex(team => team.some(p => p.id === meId))
+    ) : -1;
+    const canPickAny = isAdmin || myIndex === -1;
+    let scopeFilter = canPickAny ? scoringTeamFilter : myIndex;
+    if(scopeFilter === 'auto') scopeFilter = myIndex !== -1 ? myIndex : 'all';
+    if(typeof scopeFilter === 'number' && !rosterSource[scopeFilter]) scopeFilter = 'all';
+    const multipleScopes = teamsInfo.teams.length > 1;
+    const showScopeFilter = canPickAny && multipleScopes;
+    const filteredToScope = multipleScopes && scopeFilter !== 'all';
+    const visibleRoundPlayers = filteredToScope ? (rosterSource[scopeFilter] || []) : allRoundPlayers;
+    const scopeWord = groupsMode ? 'Group' : 'Team';
 
-    const teamFilterHtml = showTeamFilter ? `
+    const teamFilterHtml = showScopeFilter ? `
       <div style="margin-bottom:10px;">
         <label style="font-size:12px; color:#6b6a5e; font-weight:500;">Showing
           <select id="ts-scoring-team-filter" style="margin-left:6px; font-family:'Inter'; font-size:13px; padding:6px 10px; border-radius:7px; border:1px solid var(--ivory-line);">
-            <option value="all" ${teamFilter==='all'?'selected':''}>All teams</option>
-            ${teamsInfo.teams.map((t, ti) => `<option value="${ti}" ${teamFilter===ti?'selected':''}>Team ${ti+1}${ti===myTeamIndex?' (mine)':''}</option>`).join('')}
+            <option value="all" ${scopeFilter==='all'?'selected':''}>All ${groupsMode ? 'groups' : 'teams'}</option>
+            ${rosterSource.map((t, ti) => `<option value="${ti}" ${scopeFilter===ti?'selected':''}>${scopeWord} ${ti+1}${ti===myIndex?' (mine)':''}</option>`).join('')}
           </select>
         </label>
-      </div>` : (filteredToTeam ? `
-      <div style="margin-bottom:10px; font-size:12px; color:#6b6a5e; font-weight:500;">Showing: Team ${teamFilter+1} <span style="font-weight:400;">— your team</span></div>` : '');
+      </div>` : (filteredToScope ? `
+      <div style="margin-bottom:10px; font-size:12px; color:#6b6a5e; font-weight:500;">Showing: ${scopeWord} ${scopeFilter+1} <span style="font-weight:400;">— your ${groupsMode ? 'group' : 'team'}</span></div>` : '');
 
     // No more silent par pre-fill — a box that's never been tapped stays
     // truly empty (see hbhRowHtml below), and the Match scoreboard shows a
@@ -4420,8 +4547,19 @@
             } Needs exact hole handicaps (see above) to allocate strokes hole by hole. Handicap basis: ${round.handicapBasis === 'hc' ? 'strokes are allocated off each player\'s full course handicap (HC).' : 'strokes are allocated off each player\'s strokes-off-the-lowest-handicap-in-the-field (S.O.).'}</p>
             <p style="margin:6px 0 0; font-size:12px; color:#6b6a5e;">With this starting hole, ${groups.map((holes, si) => `Series ${si+1} is holes ${holes[0]}–${holes[holes.length-1]}`).join(', ')}. On a shotgun start, holes don't need to be entered in this order — jump straight to whichever hole your group just finished in Live Scoring, in any order, and come back to fill in the rest later.</p>
           </div>
+          <div class="ts-import-row">
+            <span class="ts-import-row-label">Scoring format</span>
+            <div class="ts-subtabbar" style="margin-top:6px;">
+              <button type="button" class="ts-subtab ${round.scoringMode==='teams'?'active':''}" data-scoring-mode="teams">Play as Teams</button>
+              <button type="button" class="ts-subtab ${round.scoringMode==='groups'?'active':''}" data-scoring-mode="groups">Play as Groups</button>
+            </div>
+            <p style="margin:8px 0 0;">${round.scoringMode === 'groups'
+              ? 'Players tee off in the physical playing groups assembled below, mixing betting teams together however you like. The bet is still settled by betting team either way — this only changes how scores get entered in Live Scoring.'
+              : 'Players tee off with their own betting team. Switch to Play as Groups to mix players from different betting teams into their own physical groups for scoring.'}</p>
+          </div>
           ${teamsDisplayHtml}
           ${swapRowHtml}
+          ${groupsAssignHtml}
           ${acceptTeamsHtml}
           ${scorecardsBlockHtml}
         ` : scoringViewMode === 'season' ? `
@@ -5493,6 +5631,59 @@
         render();
       });
     });
+
+    // "Play as Teams" / "Play as Groups" — a per-round setting, saved as part
+    // of a regular full-data save (same setup-time-choice pattern as Game and
+    // Handicap basis above). Open to anyone, same as the rest of Set up & Bets.
+    document.querySelectorAll('[data-scoring-mode]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const mode = btn.getAttribute('data-scoring-mode');
+        const round = ensureRoundDefaults(scoringSelectedDate);
+        if(round.scoringMode === mode) return;
+        round.scoringMode = mode === 'groups' ? 'groups' : 'teams';
+        // Leaving Play as Groups (or switching dates elsewhere) shouldn't
+        // leave an old in-progress, un-accepted group edit lying around to
+        // resurface later — see pendingGroupAssignments above.
+        pendingGroupAssignments = null;
+        pendingGroupAssignmentsDate = null;
+        await saveData();
+        render();
+      });
+    });
+
+    // Assemble playing groups — each click only edits pendingGroupAssignments
+    // (a local working copy) and re-renders; nothing reaches the backend
+    // until "Accept groups" is tapped below, so placing a dozen players
+    // doesn't mean a dozen separate saves. See pendingGroupAssignments above.
+    document.querySelectorAll('[data-group-assign-player]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const dateKeyAttr = cb.getAttribute('data-group-assign-date');
+        const pid = cb.getAttribute('data-group-assign-player');
+        const targetGroup = parseInt(cb.getAttribute('data-group-assign-group'), 10);
+        if(pendingGroupAssignments === null || pendingGroupAssignmentsDate !== dateKeyAttr){
+          pendingGroupAssignments = Object.assign({}, data.playingGroups[dateKeyAttr] || {});
+          pendingGroupAssignmentsDate = dateKeyAttr;
+        }
+        if(cb.checked && targetGroup >= 0){
+          pendingGroupAssignments[pid] = targetGroup;
+        } else {
+          delete pendingGroupAssignments[pid];
+        }
+        render();
+      });
+    });
+
+    const acceptGroupsBtn = document.getElementById('ts-accept-groups-btn');
+    if(acceptGroupsBtn){
+      acceptGroupsBtn.onclick = async () => {
+        if(pendingGroupAssignments === null || pendingGroupAssignmentsDate !== scoringSelectedDate) return;
+        data.playingGroups[scoringSelectedDate] = pendingGroupAssignments;
+        pendingGroupAssignments = null;
+        pendingGroupAssignmentsDate = null;
+        await saveData();
+        render();
+      };
+    }
 
     document.querySelectorAll('[data-duty-sort]').forEach(btn => {
       btn.addEventListener('click', () => {
